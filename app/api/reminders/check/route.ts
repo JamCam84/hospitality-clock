@@ -1,30 +1,29 @@
-/**
- * app/api/reminders/check/route.ts
- *
- * Backend reminder scanner — GET /api/reminders/check
- *
- * ─── What this does ───────────────────────────────────────────────────────────
- * 1. Reads reminder settings from payroll_settings.
- * 2. If reminders are enabled and the current server time is past reminder_time,
- *    finds all clock_sessions that are still open and haven't had a reminder sent.
- * 3. Stamps those sessions with clock_out_reminder_sent_at = now().
- * 4. Returns a summary payload.
- *
- * The WhatsApp send step is intentionally stubbed out with a comment block.
- * Replace the stub with your WhatsApp Business API / Twilio / etc. call
- * when you're ready to wire that up.
- *
- * ─── How to call this ─────────────────────────────────────────────────────────
- * Externally:  cron job → GET https://your-app/api/reminders/check?secret=XXXX
- * Supabase:    pg_cron → SELECT http_get('https://your-app/api/reminders/check?secret=XXXX')
- * Vercel:      vercel.json cron → { "path": "/api/reminders/check", "schedule": "*/5 * * * *" }
- *
- * ─── Security ─────────────────────────────────────────────────────────────────
- * Set  REMINDER_SECRET  in your environment variables.
- * Pass it as  ?secret=REMINDER_SECRET  in the cron URL.
- * The route returns 401 for any request that omits or mismatches the secret.
- * If REMINDER_SECRET is not set, the check is skipped (dev / local use only).
- */
+// app/api/reminders/check/route.ts
+//
+// Backend reminder scanner — GET /api/reminders/check
+//
+// ── What this does ────────────────────────────────────────────────────────────
+// 1. Reads reminder settings from payroll_settings.
+// 2. If reminders are enabled and the current server time is past reminder_time,
+//    finds all clock_sessions that are still open and haven't had a reminder sent.
+// 3. Stamps those sessions with clock_out_reminder_sent_at = now().
+// 4. Returns a summary payload.
+//
+// The WhatsApp send step is intentionally stubbed out.
+// Replace the stub with your WhatsApp Business API / Twilio / etc. call
+// when you're ready to wire that up.
+//
+// ── How to call this ──────────────────────────────────────────────────────────
+// Externally:  cron job → GET https://your-app/api/reminders/check?secret=XXXX
+// Supabase:    pg_cron → SELECT http_get('https://your-app/api/reminders/check?secret=XXXX')
+// Vercel:      vercel.json cron → { "path": "/api/reminders/check", "schedule": "*/5 * * * *" }
+//              (note: "*/5 * * * *" = every 5 minutes)
+//
+// ── Security ──────────────────────────────────────────────────────────────────
+// Set  REMINDER_SECRET  in your environment variables.
+// Pass it as  ?secret=REMINDER_SECRET  in the cron URL.
+// The route returns 401 for any request that omits or mismatches the secret.
+// If REMINDER_SECRET is not set, the check is skipped (dev / local use only).
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
