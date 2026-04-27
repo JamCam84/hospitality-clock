@@ -68,6 +68,17 @@ type PayrollRow = {
   editedCount: number;            // sessions that were edited or manually added
 };
 
+// ─── Safe row mapper ──────────────────────────────────────────────────────────
+// Supabase's generated types don't include columns added by SQL migrations
+// (edited, edited_by, edited_at, edit_reason, manually_added, manual_add_reason),
+// so a direct `as ClockSession[]` cast produces "GenericStringError[]" at build
+// time. Routing through `unknown` first is the TypeScript-standard way to break
+// the incompatible-types error intentionally and safely.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toSession(row: any): ClockSession {
+  return row as unknown as ClockSession;
+}
+
 // ─── Input class reused across all form inputs ─────────────────────────────────
 const inputCls =
   "w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-800 " +
@@ -135,7 +146,7 @@ export default function ApprovalPage() {
       setSettings(loadedSettings);
 
       // Store the complete unfiltered staff list for the Manual Add picker
-      setAllStaff((allStaffResult.data ?? []) as StaffMember[]);
+      setAllStaff((allStaffResult.data ?? []) as unknown as StaffMember[]);
 
       // Auto-calculate period dates from settings
       const period = calcPayPeriod(loadedSettings, "monthly");
@@ -190,8 +201,8 @@ export default function ApprovalPage() {
     if (staffResult.error || sessionResult.error) {
       setLoadError("Could not load data. Check your connection and try again.");
     } else {
-      setStaffList((staffResult.data ?? []) as StaffMember[]);
-      setSessions((sessionResult.data ?? []) as ClockSession[]);
+      setStaffList((staffResult.data ?? []) as unknown as StaffMember[]);
+      setSessions((sessionResult.data ?? []).map(toSession));
     }
 
     setHasLoaded(true);
@@ -370,8 +381,9 @@ export default function ApprovalPage() {
     }
 
     // 2. Write audit log entry
+    const insertedSession = toSession(newRow);
     await supabase.from("time_edit_log").insert({
-      clock_session_id:  (newRow as ClockSession).id,
+      clock_session_id:  insertedSession.id,
       staff_id:          manualStaffId,
       new_clock_in_time: clockInISO,
       new_clock_out_time: clockOutISO,
@@ -382,7 +394,7 @@ export default function ApprovalPage() {
 
     // 3. Add to local session list if it falls within the loaded date range
     if (manualDate >= dateFrom && manualDate <= dateTo) {
-      setSessions((prev) => [newRow as ClockSession, ...prev]);
+      setSessions((prev) => [insertedSession, ...prev]);
     }
 
     // 4. Reset form
