@@ -67,6 +67,17 @@ type SelectedCell = {
  */
 type RowStatus = "unapproved" | "approved";
 
+// ─── Safe row mapper ──────────────────────────────────────────────────────────
+// Supabase's auto-generated types don't include columns added by SQL migrations
+// (edited, edited_by, edit_reason, manually_added, manual_add_reason), so a
+// direct `as ClockSession[]` cast produces a "GenericStringError[]" build error.
+// Routing through `unknown` is the TypeScript-standard way to break the
+// incompatible-types error intentionally and safely.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toSession(row: any): ClockSession {
+  return row as unknown as ClockSession;
+}
+
 // ─── Shared input style ───────────────────────────────────────────────────────
 
 const inputCls =
@@ -395,8 +406,8 @@ export default function CalendarTimesPage() {
     if (staffResult.error || sessionResult.error) {
       setLoadError("Could not load data. Check your connection and try again.");
     } else {
-      setStaffList((staffResult.data  ?? []) as StaffMember[]);
-      setSessions( (sessionResult.data ?? []) as ClockSession[]);
+      setStaffList((staffResult.data  ?? []) as unknown as StaffMember[]);
+      setSessions( (sessionResult.data ?? []).map(toSession));
     }
 
     setHasLoaded(true);
@@ -587,8 +598,9 @@ export default function CalendarTimesPage() {
       return;
     }
 
+    const insertedSession = toSession(newRow);
     await supabase.from("time_edit_log").insert({
-      clock_session_id:  (newRow as ClockSession).id,
+      clock_session_id:  insertedSession.id,
       staff_id:          staffId,
       new_clock_in_time: clockInISO,
       new_clock_out_time: clockOutISO,
@@ -597,7 +609,7 @@ export default function CalendarTimesPage() {
       reason:            manualReason.trim(),
     });
 
-    setSessions((prev) => [...prev, newRow as ClockSession]);
+    setSessions((prev) => [...prev, insertedSession]);
 
     setManualIn("");
     setManualOut("");
