@@ -21,7 +21,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import ManagerNav from "@/components/ManagerNav";
-import { isoToDatetimeLocal, localToday } from "@/lib/time-calc";
+import { formatEmployeeNumber, isoToDatetimeLocal, localToday } from "@/lib/time-calc";
 import { PageHeader } from "@/components/ui";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -895,7 +895,7 @@ export default function CalendarTimesPage() {
                         </div>
                         <div className="font-normal text-stone-400 text-[10px] truncate
                                         max-w-[80px] mx-auto">
-                          {staff.employee_number ?? staff.last_name ?? ""}
+                          {staff.employee_number ? formatEmployeeNumber(staff.employee_number) : (staff.last_name ?? "")}
                         </div>
                       </th>
                     ))}
@@ -1113,7 +1113,7 @@ export default function CalendarTimesPage() {
                 </p>
                 {panelStaff?.employee_number && (
                   <p className="text-xs text-stone-400 font-mono mt-0.5">
-                    #{panelStaff.employee_number}
+                    #{formatEmployeeNumber(panelStaff.employee_number)}
                     {panelStaff.role ? ` · ${panelStaff.role}` : ""}
                   </p>
                 )}

@@ -201,3 +201,30 @@ export function isoToDatetimeLocal(iso: string | null | undefined): string {
     String(d.getMinutes()).padStart(2, "0"),
   ].join(":");
 }
+
+/**
+ * formatEmployeeNumber
+ *
+ * Formats an employee number as a zero-padded 3-digit payroll ID.
+ * Only the display is affected — the underlying database value is unchanged.
+ *
+ * Examples:
+ *   "1"   → "001"
+ *   "2"   → "002"
+ *   "15"  → "015"
+ *   "125" → "125"
+ *   ""    → "—"
+ *   null  → "—"
+ */
+export function formatEmployeeNumber(
+  raw: string | null | undefined
+): string {
+  if (!raw || !raw.trim()) return "—";
+  // If the value is numeric, pad it to 3 digits.
+  // If it's already a custom string (e.g. "EMP-001"), return it unchanged.
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return trimmed.padStart(3, "0");
+  }
+  return trimmed;
+}

@@ -13,6 +13,7 @@ import {
   formatTime,
   formatDate,
   calcPayPeriod,
+  formatEmployeeNumber,
   isoToDatetimeLocal,
   localToday,
   type PayrollSettings,
@@ -652,7 +653,7 @@ export default function ApprovalPage() {
                           onClick={() => toggleExpand(row.id)}
                         >
                           <td className="px-4 py-3 font-mono text-xs text-stone-400 whitespace-nowrap">
-                            {row.employee_number || "—"}
+                            {formatEmployeeNumber(row.employee_number)}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap">
                             <p className="font-semibold text-stone-800">

@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import * as XLSX from "xlsx";
 import { supabase } from "@/lib/supabase";
 import ManagerNav from "@/components/ManagerNav";
+import { formatEmployeeNumber } from "@/lib/time-calc";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -115,10 +117,14 @@ function formatHours(minutes: number): string {
   return (minutes / 60).toFixed(2) + " hrs";
 }
 
-// ─── CSV export helper ────────────────────────────────────────────────────────
+// ─── Excel export helper ─────────────────────────────────────────────────────
+// Exports a proper .xlsx file so Excel respects column types natively.
+// The employee_number column is explicitly formatted as Text ("@") so leading
+// zeros like "001" are never stripped — no formula tricks needed.
 
-function exportCSV(rows: PayrollRow[], dateFrom: string, dateTo: string) {
-  const headers = [
+function exportXLSX(rows: PayrollRow[], dateFrom: string, dateTo: string) {
+  // ── 1. Build data ───────────────────────────────────────────────────────────
+  const header = [
     "employee_number",
     "first_name",
     "last_name",
@@ -132,38 +138,39 @@ function exportCSV(rows: PayrollRow[], dateFrom: string, dateTo: string) {
     "date_to",
   ];
 
-  const csvLines = rows.map((r) => {
-    // Wrap each field in quotes to handle commas inside values (e.g. branch names)
-    const fields = [
-      r.employee_number,
-      r.first_name,
-      r.last_name,
-      r.pay_frequency,
-      r.role,
-      r.branch,
-      String(r.sessions_count),
-      (r.total_worked_minutes / 60).toFixed(2),
-      (r.total_break_minutes / 60).toFixed(2),
-      dateFrom,
-      dateTo,
-    ];
-    return fields.map((f) => `"${f}"`).join(",");
-  });
+  const data = rows.map((r) => [
+    formatEmployeeNumber(r.employee_number),          // col A — kept as text
+    r.first_name    ?? "",
+    r.last_name     ?? "",
+    r.pay_frequency ?? "",
+    r.role          ?? "",
+    r.branch        ?? "",
+    r.sessions_count,
+    parseFloat((r.total_worked_minutes / 60).toFixed(2)),
+    parseFloat((r.total_break_minutes  / 60).toFixed(2)),
+    dateFrom,
+    dateTo,
+  ]);
 
-  // \uFEFF = UTF-8 BOM — tells Excel to open the file with correct encoding
-  const csv  = "\uFEFF" + [headers.join(","), ...csvLines].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url  = URL.createObjectURL(blob);
+  // ── 2. Create worksheet & workbook ─────────────────────────────────────────
+  const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
 
-  // Trigger a browser download (appending to body ensures the click works in all browsers)
-  const a       = document.createElement("a");
-  a.href        = url;
-  a.download    = `payroll_${dateFrom}_to_${dateTo}.csv`;
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // ── 3. Force column A (employee_number) to Text type ───────────────────────
+  // t:"s" = string cell; z:"@" = Text number format.
+  // Without this Excel silently converts "001" to the number 1.
+  const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+  for (let row = 1; row <= range.e.r; row++) {
+    const addr = XLSX.utils.encode_cell({ r: row, c: 0 });
+    if (ws[addr]) {
+      ws[addr].t = "s";
+      ws[addr].z = "@";
+    }
+  }
+
+  // ── 4. Download ─────────────────────────────────────────────────────────────
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Payroll");
+  XLSX.writeFile(wb, `payroll_${dateFrom}_to_${dateTo}.xlsx`);
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -385,7 +392,7 @@ export default function PayrollReportPage() {
 
               {rows.length > 0 && (
                 <button
-                  onClick={() => exportCSV(rows, dateFrom, dateTo)}
+                  onClick={() => exportXLSX(rows, dateFrom, dateTo)}
                   className="flex items-center gap-1.5 bg-stone-800 hover:bg-stone-700 active:scale-95
                              text-white font-semibold text-sm rounded-xl px-4 py-2
                              transition-all duration-150 shadow-sm"
@@ -395,7 +402,7 @@ export default function PayrollReportPage() {
                     <path strokeLinecap="round" strokeLinejoin="round"
                       d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
                   </svg>
-                  Export CSV
+                  Export Excel
                 </button>
               )}
             </div>
@@ -437,7 +444,7 @@ export default function PayrollReportPage() {
 
                           {/* Employee number */}
                           <td className="px-4 py-3 text-stone-500 whitespace-nowrap font-mono text-xs">
-                            {row.employee_number || "—"}
+                            {formatEmployeeNumber(row.employee_number)}
                           </td>
 
                           {/* Name */}

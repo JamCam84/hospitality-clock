@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import ManagerNav from "@/components/ManagerNav";
+import { formatEmployeeNumber } from "@/lib/time-calc";
 import {
   PageHeader,
   SummaryCard,
@@ -253,7 +254,7 @@ export default function ManagerDashboardPage() {
                           {staff.first_name} {staff.last_name}
                         </p>
                         {staff.employee_number && (
-                          <span className="text-xs text-gray-400 font-mono">#{staff.employee_number}</span>
+                          <span className="text-xs text-gray-400 font-mono">#{formatEmployeeNumber(staff.employee_number)}</span>
                         )}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5 flex-wrap">

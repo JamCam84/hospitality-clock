@@ -16,6 +16,7 @@
  */
 
 import { useState, useRef, useEffect } from "react";
+import { formatEmployeeNumber } from "@/lib/time-calc";
 
 // ─── Employee shape this component expects ────────────────────────────────────
 // All string fields are nullable so the component handles incomplete records
@@ -114,7 +115,7 @@ export default function EmployeeSearchSelect({
 
   // ── Helper: display a single employee's name line ────────────────────────────
   function displayName(e: EmployeeOption) {
-    const num  = e.employee_number ? `${e.employee_number} — ` : "";
+    const num  = e.employee_number ? `${formatEmployeeNumber(e.employee_number)} — ` : "";
     const name = [e.first_name, e.last_name].filter(Boolean).join(" ") || "Unnamed";
     return `${num}${name}`;
   }

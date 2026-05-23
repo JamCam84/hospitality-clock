@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import ManagerNav from "@/components/ManagerNav";
+import { formatEmployeeNumber } from "@/lib/time-calc";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -264,7 +265,7 @@ export default function AttendancePage() {
                       {staff.first_name} {staff.last_name}
                       {staff.employee_number && (
                         <span className="ml-1.5 text-xs font-normal text-stone-400">
-                          #{staff.employee_number}
+                          #{formatEmployeeNumber(staff.employee_number)}
                         </span>
                       )}
                     </p>
