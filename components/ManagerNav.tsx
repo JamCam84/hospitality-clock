@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import VersionBadge from "@/components/VersionBadge";
 
 // ─── Nav items ────────────────────────────────────────────────────────────────
 // Add or remove pages here — the nav updates automatically.
@@ -118,6 +119,7 @@ export default function ManagerNav() {
   const pathname = usePathname();
 
   return (
+    <>
     <nav className="bg-white border-b border-stone-200">
       <div className="max-w-5xl mx-auto px-4">
 
@@ -156,5 +158,9 @@ export default function ManagerNav() {
 
       </div>
     </nav>
+
+    {/* Version badge — fixed bottom-left, visible on all manager pages */}
+    <VersionBadge />
+    </>
   );
 }
