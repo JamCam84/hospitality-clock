@@ -10,11 +10,15 @@
 
 // ─── Minimal session shape needed for calculations ────────────────────────────
 // Your full ClockSession type will satisfy this automatically as long as it
-// has at least these four fields.
+// has at least these fields.  The optional fields below are used by the
+// manager time-correction feature; existing callers that omit them still work.
 export type SessionForCalc = {
   work_date: string;
   clock_in_time: string | null;
   clock_out_time: string | null;
+  // Manager-editable time fields (optional — ignored if not present)
+  break_minutes?: number | null;       // break deducted from this session
+  edited_total_hours?: number | null;  // override: if set, used directly as payroll hours
 };
 
 // ─── Worked minutes ───────────────────────────────────────────────────────────
@@ -75,6 +79,39 @@ export function calcBreakMinutes(sessions: SessionForCalc[]): number {
   }
 
   return totalBreakMins;
+}
+
+// ─── Per-session payroll minutes ──────────────────────────────────────────────
+
+/**
+ * calcSessionFinalMinutes
+ *
+ * Returns the payroll-billable minutes for a single closed session.
+ *
+ * Priority order:
+ *  1. If edited_total_hours is set → use that directly (manager override).
+ *  2. Otherwise → (clock_out − clock_in) minus break_minutes.
+ *  3. Open sessions (no clock_out_time) always return 0.
+ *
+ * The result is always >= 0 (never negative).
+ *
+ * Examples:
+ *   { in: 08:00, out: 17:00, break_minutes: 60 }           → 480m (8 hrs)
+ *   { in: 08:00, out: 17:00, edited_total_hours: 7.5 }     → 450m (7.5 hrs override)
+ *   { in: 08:00, out: null  }                               → 0  (still clocked in)
+ */
+export function calcSessionFinalMinutes(session: SessionForCalc): number {
+  // Manager override takes top priority
+  if (session.edited_total_hours != null && session.edited_total_hours >= 0) {
+    return session.edited_total_hours * 60;
+  }
+  // Open session — not counted
+  if (!session.clock_in_time || !session.clock_out_time) return 0;
+  const rawMins =
+    (new Date(session.clock_out_time).getTime() -
+      new Date(session.clock_in_time).getTime()) / 60_000;
+  // Deduct explicit break (floor at 0 — can't have negative worked time)
+  return Math.max(0, rawMins - (session.break_minutes ?? 0));
 }
 
 // ─── Formatting ───────────────────────────────────────────────────────────────

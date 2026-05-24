@@ -7,8 +7,7 @@ import ManagerNav from "@/components/ManagerNav";
 import EmployeeSearchSelect from "@/components/EmployeeSearchSelect";
 import { PageHeader, SummaryCard } from "@/components/ui";
 import {
-  calcWorkedMinutes,
-  calcBreakMinutes,
+  calcSessionFinalMinutes,
   formatHours,
   formatTime,
   formatDate,
@@ -42,16 +41,28 @@ type ClockSession = {
   suspicious_clock_in_reason: string | null;
   suspicious_clock_out: boolean | null;
   suspicious_clock_out_reason: string | null;
-  // Added columns for approval workflow
+  // Audit columns
   edited: boolean | null;
   edited_by: string | null;
   edited_at: string | null;
   edit_reason: string | null;
   manually_added: boolean | null;
   manual_add_reason: string | null;
+  // Time-correction columns
+  break_minutes: number | null;
+  edited_total_hours: number | null;
+  manager_note: string | null;
+  // Approval columns
+  approved: boolean;
+  approved_by: string | null;
+  approved_at: string | null;
+  approval_note: string | null;
 };
 
-// ─── Per-employee computed row (built from staffList + sessions) ───────────────
+// ─── Approval status per employee ─────────────────────────────────────────────
+type ApprovalStatus = "approved" | "needs_attention" | "pending";
+
+// ─── Per-employee computed row ─────────────────────────────────────────────────
 
 type PayrollRow = {
   id: string;
@@ -61,23 +72,36 @@ type PayrollRow = {
   pay_frequency: string;
   role: string;
   branch: string;
-  sessions: ClockSession[];       // all sessions for this employee in the period
-  closedCount: number;            // sessions with both times present
+  sessions: ClockSession[];
+  closedCount: number;
   workedMins: number;
   breakMins: number;
-  hasDiscrepancy: boolean;        // any un-edited suspicious flag
-  editedCount: number;            // sessions that were edited or manually added
+  hasDiscrepancy: boolean;
+  editedCount: number;
+  approvalStatus: ApprovalStatus;
 };
 
 // ─── Safe row mapper ──────────────────────────────────────────────────────────
-// Supabase's generated types don't include columns added by SQL migrations
-// (edited, edited_by, edited_at, edit_reason, manually_added, manual_add_reason),
-// so a direct `as ClockSession[]` cast produces "GenericStringError[]" at build
-// time. Routing through `unknown` first is the TypeScript-standard way to break
-// the incompatible-types error intentionally and safely.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function toSession(row: any): ClockSession {
   return row as unknown as ClockSession;
+}
+
+// ─── Derive per-employee approval status ──────────────────────────────────────
+function deriveApprovalStatus(mySessions: ClockSession[]): ApprovalStatus {
+  if (mySessions.length === 0) return "pending";
+  // Any open session (no clock-out) = needs attention
+  const hasOpen = mySessions.some((s) => !s.clock_out_time);
+  if (hasOpen) return "needs_attention";
+  // Any unedited suspicious flag = needs attention
+  const hasSuspicious = mySessions.some(
+    (s) => (s.suspicious_clock_in || s.suspicious_clock_out) && !s.edited
+  );
+  if (hasSuspicious) return "needs_attention";
+  // All closed sessions approved = approved
+  const closed = mySessions.filter((s) => s.clock_in_time && s.clock_out_time);
+  if (closed.length > 0 && closed.every((s) => s.approved)) return "approved";
+  return "pending";
 }
 
 // ─── Input class reused across all form inputs ─────────────────────────────────
@@ -85,6 +109,43 @@ const inputCls =
   "w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-800 " +
   "focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent " +
   "transition disabled:opacity-50";
+
+// ─── Status badge component ───────────────────────────────────────────────────
+function StatusBadge({ status }: { status: ApprovalStatus }) {
+  if (status === "approved") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1
+                       rounded-full bg-emerald-100 text-emerald-700">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+        Approved
+      </span>
+    );
+  }
+  if (status === "needs_attention") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1
+                       rounded-full bg-amber-100 text-amber-700">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+        </svg>
+        Needs Attention
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1
+                     rounded-full bg-stone-100 text-stone-500">
+      <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01" />
+      </svg>
+      Pending Review
+    </span>
+  );
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -100,8 +161,6 @@ export default function ApprovalPage() {
 
   // ── Loaded data ───────────────────────────────────────────────────────────────
   const [staffList, setStaffList]   = useState<StaffMember[]>([]);
-  // allStaff is loaded once on mount (unfiltered) so the Manual Add picker
-  // always shows every employee regardless of the pay-period filter.
   const [allStaff, setAllStaff]     = useState<StaffMember[]>([]);
   const [sessions, setSessions]     = useState<ClockSession[]>([]);
   const [isLoading, setIsLoading]   = useState(false);
@@ -113,12 +172,24 @@ export default function ApprovalPage() {
 
   // ── Edit session state ────────────────────────────────────────────────────────
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
-  const [editIn, setEditIn]           = useState("");
-  const [editOut, setEditOut]         = useState("");
-  const [editReason, setEditReason]   = useState("");
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
-  const [editMessage, setEditMessage] = useState("");
-  const [editIsError, setEditIsError] = useState(false);
+  const [editIn, setEditIn]                     = useState("");
+  const [editOut, setEditOut]                   = useState("");
+  const [editReason, setEditReason]             = useState("");
+  const [editBreakMins, setEditBreakMins]       = useState("");
+  const [editTotalHours, setEditTotalHours]     = useState("");
+  const [editManagerNote, setEditManagerNote]   = useState("");
+  const [isSavingEdit, setIsSavingEdit]         = useState(false);
+  const [editMessage, setEditMessage]           = useState("");
+  const [editIsError, setEditIsError]           = useState(false);
+
+  // ── Approval state ────────────────────────────────────────────────────────────
+  const [approvingStaffId, setApprovingStaffId]         = useState<string | null>(null);
+  const [approvalFeedback, setApprovalFeedback]         = useState("");
+  const [approvalFeedbackIsError, setApprovalFeedbackIsError] = useState(false);
+  const [showApproveAllModal, setShowApproveAllModal]   = useState(false);
+  const [approveAllNote, setApproveAllNote]             = useState("");
+  const [isApprovingAll, setIsApprovingAll]             = useState(false);
+  const [approveAllError, setApproveAllError]           = useState("");
 
   // ── Manual add form ───────────────────────────────────────────────────────────
   const [manualStaffId, setManualStaffId]   = useState("");
@@ -134,7 +205,6 @@ export default function ApprovalPage() {
   // ─── 1. Load settings + auto-calculate initial period on mount ────────────────
   useEffect(() => {
     async function init() {
-      // Load payroll settings and all staff in parallel
       const [settingsResult, allStaffResult] = await Promise.all([
         supabase.from("payroll_settings").select("*").limit(1).maybeSingle(),
         supabase
@@ -145,16 +215,12 @@ export default function ApprovalPage() {
 
       const loadedSettings = (settingsResult.data as PayrollSettings | null) ?? null;
       setSettings(loadedSettings);
-
-      // Store the complete unfiltered staff list for the Manual Add picker
       setAllStaff((allStaffResult.data ?? []) as unknown as StaffMember[]);
 
-      // Auto-calculate period dates from settings
       const period = calcPayPeriod(loadedSettings, "monthly");
       setDateFrom(period.from);
       setDateTo(period.to);
 
-      // Auto-load data immediately
       await loadData(period.from, period.to, "monthly");
     }
     init();
@@ -173,7 +239,6 @@ export default function ApprovalPage() {
     setIsLoading(true);
     setLoadError("");
 
-    // Build staff query (filter by pay_frequency if not "all")
     let staffQuery = supabase
       .from("staff")
       .select("id, first_name, last_name, employee_number, pay_frequency, role, branch")
@@ -191,7 +256,9 @@ export default function ApprovalPage() {
           "id, staff_id, work_date, clock_in_time, clock_out_time, status, " +
           "suspicious_clock_in, suspicious_clock_in_reason, " +
           "suspicious_clock_out, suspicious_clock_out_reason, " +
-          "edited, edited_by, edited_at, edit_reason, manually_added, manual_add_reason"
+          "edited, edited_by, edited_at, edit_reason, manually_added, manual_add_reason, " +
+          "break_minutes, edited_total_hours, manager_note, " +
+          "approved, approved_by, approved_at, approval_note"
         )
         .gte("work_date", from)
         .lte("work_date", to)
@@ -214,6 +281,7 @@ export default function ApprovalPage() {
     loadData(dateFrom, dateTo, payType);
     setExpandedStaffId(null);
     setEditingSessionId(null);
+    setApprovalFeedback("");
   }
 
   // ─── Toggle employee detail panel ────────────────────────────────────────────
@@ -221,6 +289,7 @@ export default function ApprovalPage() {
     setExpandedStaffId((prev) => (prev === staffId ? null : staffId));
     setEditingSessionId(null);
     setEditMessage("");
+    setApprovalFeedback("");
   }
 
   // ─── Start editing a session ──────────────────────────────────────────────────
@@ -229,6 +298,9 @@ export default function ApprovalPage() {
     setEditIn(isoToDatetimeLocal(session.clock_in_time));
     setEditOut(isoToDatetimeLocal(session.clock_out_time));
     setEditReason("");
+    setEditBreakMins(session.break_minutes != null ? String(session.break_minutes) : "");
+    setEditTotalHours(session.edited_total_hours != null ? String(session.edited_total_hours) : "");
+    setEditManagerNote(session.manager_note ?? "");
     setEditMessage("");
   }
 
@@ -237,6 +309,9 @@ export default function ApprovalPage() {
     setEditIn("");
     setEditOut("");
     setEditReason("");
+    setEditBreakMins("");
+    setEditTotalHours("");
+    setEditManagerNote("");
     setEditMessage("");
   }
 
@@ -256,27 +331,52 @@ export default function ApprovalPage() {
     const newClockIn  = new Date(editIn).toISOString();
     const newClockOut = editOut ? new Date(editOut).toISOString() : null;
 
-    // Guard against out-before-in
     if (newClockOut && new Date(newClockOut) <= new Date(newClockIn)) {
       setEditMessage("Clock-out must be after clock-in.");
       setEditIsError(true);
       return;
     }
 
+    const newBreakMins: number | null =
+      editBreakMins.trim() !== "" ? parseInt(editBreakMins, 10) : null;
+    const newTotalHours: number | null =
+      editTotalHours.trim() !== "" ? parseFloat(editTotalHours) : null;
+
+    if (newBreakMins !== null && (isNaN(newBreakMins) || newBreakMins < 0)) {
+      setEditMessage("Break minutes must be a positive whole number.");
+      setEditIsError(true);
+      return;
+    }
+    if (newTotalHours !== null && (isNaN(newTotalHours) || newTotalHours < 0)) {
+      setEditMessage("Override total hours must be a positive number (e.g. 7.5).");
+      setEditIsError(true);
+      return;
+    }
+
+    const newManagerNote: string | null = editManagerNote.trim() || null;
+    const now = new Date().toISOString();
+
     setIsSavingEdit(true);
     setEditMessage("");
 
-    // 1. Update the clock_session row
+    // ── Update the clock_session row — resets approval when times change ─────────
     const { error: updateError } = await supabase
       .from("clock_sessions")
       .update({
-        clock_in_time:  newClockIn,
-        clock_out_time: newClockOut,
-        status:         newClockOut ? "clocked_out" : "clocked_in",
-        edited:         true,
-        edited_by:      "Manager",
-        edited_at:      new Date().toISOString(),
-        edit_reason:    editReason.trim(),
+        clock_in_time:      newClockIn,
+        clock_out_time:     newClockOut,
+        status:             newClockOut ? "clocked_out" : "clocked_in",
+        edited:             true,
+        edited_by:          "Manager",
+        edited_at:          now,
+        edit_reason:        editReason.trim(),
+        break_minutes:      newBreakMins,
+        edited_total_hours: newTotalHours,
+        manager_note:       newManagerNote,
+        // Approval reset — edited sessions must be re-approved
+        approved:           false,
+        approved_by:        null,
+        approved_at:        null,
       })
       .eq("id", session.id);
 
@@ -287,38 +387,154 @@ export default function ApprovalPage() {
       return;
     }
 
-    // 2. Write audit log entry
-    await supabase.from("time_edit_log").insert({
-      clock_session_id:  session.id,
-      staff_id:          session.staff_id,
-      old_clock_in_time: session.clock_in_time,
-      old_clock_out_time: session.clock_out_time,
-      new_clock_in_time: newClockIn,
-      new_clock_out_time: newClockOut,
-      action_type:       "edit",
-      changed_by:        "Manager",
-      reason:            editReason.trim(),
-    });
+    // ── Audit log ────────────────────────────────────────────────────────────────
+    try {
+      await supabase.from("time_edit_log").insert({
+        clock_session_id:       session.id,
+        staff_id:               session.staff_id,
+        old_clock_in_time:      session.clock_in_time,
+        old_clock_out_time:     session.clock_out_time,
+        new_clock_in_time:      newClockIn,
+        new_clock_out_time:     newClockOut,
+        old_break_minutes:      session.break_minutes ?? null,
+        new_break_minutes:      newBreakMins,
+        old_edited_total_hours: session.edited_total_hours ?? null,
+        new_edited_total_hours: newTotalHours,
+        old_manager_note:       session.manager_note ?? null,
+        new_manager_note:       newManagerNote,
+        action_type:            "edit",
+        changed_by:             "Manager",
+        reason:                 editReason.trim(),
+      });
+    } catch (_) {
+      // audit log failure is non-fatal
+    }
 
-    // 3. Update local state so UI refreshes without a full reload
+    // ── Update local state ────────────────────────────────────────────────────────
     setSessions((prev) =>
       prev.map((s) =>
         s.id !== session.id
           ? s
           : {
               ...s,
-              clock_in_time:  newClockIn,
-              clock_out_time: newClockOut,
-              status:         newClockOut ? "clocked_out" : "clocked_in",
-              edited:         true,
-              edited_by:      "Manager",
-              edit_reason:    editReason.trim(),
+              clock_in_time:      newClockIn,
+              clock_out_time:     newClockOut,
+              status:             newClockOut ? "clocked_out" : "clocked_in",
+              edited:             true,
+              edited_by:          "Manager",
+              edited_at:          now,
+              edit_reason:        editReason.trim(),
+              break_minutes:      newBreakMins,
+              edited_total_hours: newTotalHours,
+              manager_note:       newManagerNote,
+              // Reset approval in local state too
+              approved:           false,
+              approved_by:        null,
+              approved_at:        null,
             }
       )
     );
 
     cancelEdit();
     setIsSavingEdit(false);
+  }
+
+  // ─── Approve all sessions for one employee ────────────────────────────────────
+  async function handleApproveEmployee(row: PayrollRow) {
+    setApprovingStaffId(row.id);
+    setApprovalFeedback("");
+    setApprovalFeedbackIsError(false);
+
+    const closedIds = row.sessions
+      .filter((s) => s.clock_in_time && s.clock_out_time)
+      .map((s) => s.id);
+
+    if (closedIds.length === 0) {
+      setApprovalFeedback("No closed sessions to approve for " + row.first_name + ".");
+      setApprovalFeedbackIsError(true);
+      setApprovingStaffId(null);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("clock_sessions")
+      .update({
+        approved:      true,
+        approved_by:   "Manager",
+        approved_at:   now,
+        approval_note: null,
+      })
+      .in("id", closedIds);
+
+    if (error) {
+      setApprovalFeedback("Error approving " + row.first_name + ": " + error.message);
+      setApprovalFeedbackIsError(true);
+    } else {
+      setSessions((prev) =>
+        prev.map((s) =>
+          closedIds.includes(s.id)
+            ? { ...s, approved: true, approved_by: "Manager", approved_at: now, approval_note: null }
+            : s
+        )
+      );
+      setApprovalFeedback(row.first_name + " " + row.last_name + " approved successfully.");
+      setApprovalFeedbackIsError(false);
+    }
+    setApprovingStaffId(null);
+  }
+
+  // ─── Approve all visible sessions for the full period ─────────────────────────
+  async function handleApproveFullPeriod() {
+    setIsApprovingAll(true);
+    setApproveAllError("");
+
+    const allClosedIds = sessions
+      .filter((s) => s.clock_in_time && s.clock_out_time)
+      .map((s) => s.id);
+
+    if (allClosedIds.length === 0) {
+      setApproveAllError("No closed sessions found to approve.");
+      setIsApprovingAll(false);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const note = approveAllNote.trim() || null;
+    const CHUNK = 200;
+
+    try {
+      for (let i = 0; i < allClosedIds.length; i += CHUNK) {
+        const chunk = allClosedIds.slice(i, i + CHUNK);
+        const { error } = await supabase
+          .from("clock_sessions")
+          .update({
+            approved:      true,
+            approved_by:   "Manager",
+            approved_at:   now,
+            approval_note: note,
+          })
+          .in("id", chunk);
+        if (error) throw error;
+      }
+
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.clock_in_time && s.clock_out_time
+            ? { ...s, approved: true, approved_by: "Manager", approved_at: now, approval_note: note }
+            : s
+        )
+      );
+      setShowApproveAllModal(false);
+      setApproveAllNote("");
+      setApprovalFeedback(`All ${allClosedIds.length} sessions approved for this pay period.`);
+      setApprovalFeedbackIsError(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setApproveAllError("Error: " + msg);
+    }
+
+    setIsApprovingAll(false);
   }
 
   // ─── Manually add a time entry ────────────────────────────────────────────────
@@ -354,22 +570,20 @@ export default function ApprovalPage() {
     setIsSavingManual(true);
     setManualMessage("");
 
-    // Combine reason + optional notes into one field
     const fullReason = manualNotes.trim()
       ? `${manualReason.trim()} — Notes: ${manualNotes.trim()}`
       : manualReason.trim();
 
-    // 1. Insert the new clock_session row
     const { data: newRow, error: insertError } = await supabase
       .from("clock_sessions")
       .insert({
-        staff_id:           manualStaffId,
-        work_date:          manualDate,
-        clock_in_time:      clockInISO,
-        clock_out_time:     clockOutISO,
-        status:             clockOutISO ? "clocked_out" : "clocked_in",
-        manually_added:     true,
-        manual_add_reason:  fullReason,
+        staff_id:          manualStaffId,
+        work_date:         manualDate,
+        clock_in_time:     clockInISO,
+        clock_out_time:    clockOutISO,
+        status:            clockOutISO ? "clocked_out" : "clocked_in",
+        manually_added:    true,
+        manual_add_reason: fullReason,
       })
       .select()
       .single();
@@ -381,24 +595,26 @@ export default function ApprovalPage() {
       return;
     }
 
-    // 2. Write audit log entry
     const insertedSession = toSession(newRow);
-    await supabase.from("time_edit_log").insert({
-      clock_session_id:  insertedSession.id,
-      staff_id:          manualStaffId,
-      new_clock_in_time: clockInISO,
-      new_clock_out_time: clockOutISO,
-      action_type:       "manual_add",
-      changed_by:        "Manager",
-      reason:            fullReason,
-    });
 
-    // 3. Add to local session list if it falls within the loaded date range
+    try {
+      await supabase.from("time_edit_log").insert({
+        clock_session_id:   insertedSession.id,
+        staff_id:           manualStaffId,
+        new_clock_in_time:  clockInISO,
+        new_clock_out_time: clockOutISO,
+        action_type:        "manual_add",
+        changed_by:         "Manager",
+        reason:             fullReason,
+      });
+    } catch (_) {
+      // audit log failure is non-fatal
+    }
+
     if (manualDate >= dateFrom && manualDate <= dateTo) {
       setSessions((prev) => [insertedSession, ...prev]);
     }
 
-    // 4. Reset form
     setManualStaffId("");
     setManualDate(localToday());
     setManualIn("");
@@ -412,7 +628,6 @@ export default function ApprovalPage() {
 
   // ─── Derived values ───────────────────────────────────────────────────────────
 
-  // Build per-employee rows
   const payrollRows: PayrollRow[] = staffList.map((staff) => {
     const mySessions = sessions.filter((s) => s.staff_id === staff.id);
     return {
@@ -425,19 +640,37 @@ export default function ApprovalPage() {
       branch:          staff.branch ?? "",
       sessions:        mySessions,
       closedCount:     mySessions.filter((s) => s.clock_in_time && s.clock_out_time).length,
-      workedMins:      calcWorkedMinutes(mySessions),
-      breakMins:       calcBreakMinutes(mySessions),
+      workedMins:      mySessions.reduce((sum, s) => sum + calcSessionFinalMinutes(s), 0),
+      breakMins:       mySessions.reduce((sum, s) => sum + (s.break_minutes ?? 0), 0),
       hasDiscrepancy:  mySessions.some(
         (s) => (s.suspicious_clock_in || s.suspicious_clock_out) && !s.edited
       ),
       editedCount:     mySessions.filter((s) => s.edited || s.manually_added).length,
+      approvalStatus:  deriveApprovalStatus(mySessions),
     };
   });
 
-  // Summary counts
-  const activeEmployees    = payrollRows.filter((r) => r.sessions.length > 0).length;
-  const totalDiscrepancies = payrollRows.filter((r) => r.hasDiscrepancy).length;
-  const totalEdited        = sessions.filter((s) => s.edited || s.manually_added).length;
+  // Approval summary counts
+  const activeRows           = payrollRows.filter((r) => r.sessions.length > 0);
+  const approvedRows         = activeRows.filter((r) => r.approvalStatus === "approved");
+  const pendingRows          = activeRows.filter((r) => r.approvalStatus === "pending");
+  const needsAttentionRows   = activeRows.filter((r) => r.approvalStatus === "needs_attention");
+
+  const approvedHoursMins    = approvedRows.reduce((s, r) => s + r.workedMins, 0);
+  const pendingHoursMins     = [...pendingRows, ...needsAttentionRows].reduce((s, r) => s + r.workedMins, 0);
+
+  const totalDiscrepancies   = payrollRows.filter((r) => r.hasDiscrepancy).length;
+  const totalEdited          = sessions.filter((s) => s.edited || s.manually_added).length;
+
+  // Sort: needs_attention first, then pending, then approved
+  const SORT_ORDER: Record<ApprovalStatus, number> = {
+    needs_attention: 0,
+    pending:         1,
+    approved:        2,
+  };
+  const sortedRows = [...payrollRows].sort(
+    (a, b) => SORT_ORDER[a.approvalStatus] - SORT_ORDER[b.approvalStatus]
+  );
 
   // ─── Render helpers ───────────────────────────────────────────────────────────
 
@@ -464,6 +697,11 @@ export default function ApprovalPage() {
         {session.manually_added && (
           <span className="text-xs font-medium px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">
             Manual
+          </span>
+        )}
+        {session.approved && (
+          <span className="text-xs font-medium px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+            ✓ Approved
           </span>
         )}
       </span>
@@ -512,7 +750,6 @@ export default function ApprovalPage() {
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-end">
 
-            {/* Pay type */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Pay Type</label>
               <select
@@ -526,7 +763,6 @@ export default function ApprovalPage() {
               </select>
             </div>
 
-            {/* From date */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">From Date</label>
               <input
@@ -536,7 +772,6 @@ export default function ApprovalPage() {
               />
             </div>
 
-            {/* To date */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">To Date</label>
               <input
@@ -546,7 +781,6 @@ export default function ApprovalPage() {
               />
             </div>
 
-            {/* Refresh */}
             <div>
               <button
                 onClick={handleRefresh}
@@ -560,7 +794,6 @@ export default function ApprovalPage() {
             </div>
           </div>
 
-          {/* Period label */}
           {dateFrom && dateTo && (
             <p className="text-xs text-stone-400 mt-3">
               Period: <span className="font-medium text-stone-600">{dateFrom}</span>
@@ -576,7 +809,6 @@ export default function ApprovalPage() {
           )}
         </section>
 
-        {/* Load error */}
         {loadError && (
           <p className="text-sm text-red-500 text-center bg-red-50 border border-red-100
                         rounded-2xl px-4 py-4">
@@ -586,51 +818,107 @@ export default function ApprovalPage() {
 
         {/* ══ B. SUMMARY CARDS ═══════════════════════════════════════════════ */}
         {hasLoaded && !isLoading && (
-          <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <SummaryCard
-              label="Employees in Period"
-              value={activeEmployees}
-              sub={`of ${staffList.length} total`}
-            />
-            <SummaryCard
-              label="Total Sessions"
-              value={sessions.length}
-              sub="clock sessions"
-            />
-            <SummaryCard
-              label="Open Discrepancies"
-              value={totalDiscrepancies}
-              sub="employees with flags"
-              valueColor={totalDiscrepancies > 0 ? "text-amber-500" : "text-gray-300"}
-            />
-            <SummaryCard
-              label="Edited Entries"
-              value={totalEdited}
-              sub="manual + manager edits"
-              valueColor={totalEdited > 0 ? "text-sky-600" : "text-gray-300"}
-            />
-          </section>
+          <>
+            {/* Row 1 — data overview */}
+            <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <SummaryCard
+                label="Employees in Period"
+                value={activeRows.length}
+                sub={`of ${staffList.length} total`}
+              />
+              <SummaryCard
+                label="Total Sessions"
+                value={sessions.length}
+                sub="clock sessions"
+              />
+              <SummaryCard
+                label="Open Discrepancies"
+                value={totalDiscrepancies}
+                sub="employees with flags"
+                valueColor={totalDiscrepancies > 0 ? "text-amber-500" : "text-gray-300"}
+              />
+              <SummaryCard
+                label="Edited Entries"
+                value={totalEdited}
+                sub="manual + manager edits"
+                valueColor={totalEdited > 0 ? "text-sky-600" : "text-gray-300"}
+              />
+            </section>
+
+            {/* Row 2 — approval overview */}
+            <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <SummaryCard
+                label="Approved"
+                value={approvedRows.length}
+                sub="employees approved"
+                valueColor={approvedRows.length > 0 ? "text-emerald-600" : "text-gray-300"}
+              />
+              <SummaryCard
+                label="Pending Review"
+                value={pendingRows.length + needsAttentionRows.length}
+                sub={`${needsAttentionRows.length} needs attention`}
+                valueColor={pendingRows.length + needsAttentionRows.length > 0 ? "text-amber-500" : "text-gray-300"}
+              />
+              <SummaryCard
+                label="Approved Hours"
+                value={approvedHoursMins > 0 ? formatHours(approvedHoursMins) : "—"}
+                sub="approved employee hours"
+                valueColor="text-emerald-600"
+              />
+              <SummaryCard
+                label="Pending Hours"
+                value={pendingHoursMins > 0 ? formatHours(pendingHoursMins) : "—"}
+                sub="not yet approved"
+                valueColor={pendingHoursMins > 0 ? "text-amber-500" : "text-gray-300"}
+              />
+            </section>
+          </>
         )}
 
         {/* ══ C. EMPLOYEE TABLE ══════════════════════════════════════════════ */}
         {hasLoaded && !isLoading && (
           <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-            <div className="px-5 py-4 border-b border-gray-50">
+
+            {/* Section header + Approve Full Period button */}
+            <div className="px-5 py-4 border-b border-gray-50 flex items-center justify-between gap-4 flex-wrap">
               <h2 className="text-sm font-semibold text-gray-700">Employee Time Review</h2>
+              <button
+                onClick={() => setShowApproveAllModal(true)}
+                disabled={sessions.filter((s) => s.clock_in_time && s.clock_out_time).length === 0}
+                className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600
+                           active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed
+                           text-white font-semibold text-xs rounded-xl px-4 py-2
+                           transition-all duration-150 shadow-sm"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                Approve Full Period
+              </button>
             </div>
 
-            {payrollRows.length === 0 ? (
+            {/* Global approval feedback */}
+            {approvalFeedback && (
+              <div className={`mx-5 mt-4 text-sm rounded-xl px-4 py-2.5 ${
+                approvalFeedbackIsError
+                  ? "bg-red-50 text-red-600"
+                  : "bg-emerald-50 text-emerald-700"
+              }`}>
+                {approvalFeedback}
+              </div>
+            )}
+
+            {sortedRows.length === 0 ? (
               <div className="px-5 py-10 text-center text-gray-400 text-sm">
                 No employees matched the selected filters.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm min-w-[800px]">
+                <table className="w-full text-sm min-w-[900px]">
 
-                  {/* Header */}
                   <thead className="bg-gray-50 border-b border-gray-100">
                     <tr>
-                      {["Emp #", "Name", "Role", "Department", "Pay", "Sessions", "Worked", "Break", ""].map(
+                      {["Emp #", "Name & Status", "Role", "Department", "Pay", "Sessions", "Worked", "Break", ""].map(
                         (col) => (
                           <th key={col}
                             className="text-left text-xs font-semibold text-gray-400 uppercase
@@ -643,7 +931,7 @@ export default function ApprovalPage() {
                   </thead>
 
                   <tbody>
-                    {payrollRows.map((row) => (
+                    {sortedRows.map((row) => (
                       <React.Fragment key={row.id}>
 
                         {/* ── Employee summary row ── */}
@@ -655,17 +943,13 @@ export default function ApprovalPage() {
                           <td className="px-4 py-3 font-mono text-xs text-stone-400 whitespace-nowrap">
                             {formatEmployeeNumber(row.employee_number)}
                           </td>
+
                           <td className="px-4 py-3 whitespace-nowrap">
                             <p className="font-semibold text-stone-800">
                               {row.first_name} {row.last_name}
                             </p>
-                            {/* Discrepancy / edited badges on name row */}
-                            <div className="flex gap-1 mt-0.5">
-                              {row.hasDiscrepancy && (
-                                <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">
-                                  ⚠ Needs review
-                                </span>
-                              )}
+                            <div className="flex gap-1 mt-1 flex-wrap">
+                              <StatusBadge status={row.approvalStatus} />
                               {row.editedCount > 0 && (
                                 <span className="text-xs px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">
                                   {row.editedCount} edited
@@ -673,33 +957,68 @@ export default function ApprovalPage() {
                               )}
                             </div>
                           </td>
+
                           <td className="px-4 py-3 text-stone-600 whitespace-nowrap">{row.role || "—"}</td>
                           <td className="px-4 py-3 text-stone-600 whitespace-nowrap">{row.branch || "—"}</td>
+
                           <td className="px-4 py-3 whitespace-nowrap">
                             <span className="capitalize text-xs font-medium px-2 py-0.5 rounded-full
                                              bg-stone-100 text-stone-600">
                               {row.pay_frequency || "—"}
                             </span>
                           </td>
+
                           <td className="px-4 py-3 text-center text-stone-700 whitespace-nowrap">
                             {row.closedCount}
                           </td>
+
                           <td className="px-4 py-3 whitespace-nowrap">
                             <span className={`font-semibold ${row.workedMins > 0 ? "text-emerald-600" : "text-stone-300"}`}>
                               {row.workedMins > 0 ? formatHours(row.workedMins) : "—"}
                             </span>
                           </td>
+
                           <td className="px-4 py-3 text-stone-500 whitespace-nowrap">
                             {row.breakMins > 0 ? formatHours(row.breakMins) : "—"}
                           </td>
+
+                          {/* Actions */}
                           <td className="px-4 py-3 whitespace-nowrap">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); toggleExpand(row.id); }}
-                              className="text-xs font-semibold text-emerald-600 hover:text-emerald-800
-                                         hover:bg-emerald-50 rounded-lg px-3 py-1.5 transition-colors"
-                            >
-                              {expandedStaffId === row.id ? "Collapse ▲" : "View / Edit ▼"}
-                            </button>
+                            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                              {/* Approve Employee button */}
+                              {row.approvalStatus !== "approved" ? (
+                                <button
+                                  onClick={() => handleApproveEmployee(row)}
+                                  disabled={
+                                    approvingStaffId === row.id ||
+                                    row.approvalStatus === "needs_attention"
+                                  }
+                                  title={
+                                    row.approvalStatus === "needs_attention"
+                                      ? "Resolve open sessions or flags before approving"
+                                      : "Approve all closed sessions for this employee"
+                                  }
+                                  className="text-xs font-semibold text-emerald-700 hover:text-white
+                                             hover:bg-emerald-500 border border-emerald-300
+                                             hover:border-emerald-500 rounded-lg px-2.5 py-1.5
+                                             transition-all duration-150 disabled:opacity-40
+                                             disabled:cursor-not-allowed"
+                                >
+                                  {approvingStaffId === row.id ? "…" : "Approve"}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-emerald-500 font-medium px-2.5 py-1.5">
+                                  ✓ Done
+                                </span>
+                              )}
+                              <button
+                                onClick={() => toggleExpand(row.id)}
+                                className="text-xs font-semibold text-emerald-600 hover:text-emerald-800
+                                           hover:bg-emerald-50 rounded-lg px-3 py-1.5 transition-colors"
+                              >
+                                {expandedStaffId === row.id ? "Collapse ▲" : "View / Edit ▼"}
+                              </button>
+                            </div>
                           </td>
                         </tr>
 
@@ -715,11 +1034,23 @@ export default function ApprovalPage() {
                                   </p>
                                 ) : (
                                   <div className="space-y-2">
-                                    <p className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-3">
-                                      Sessions for {row.first_name} {row.last_name}
-                                    </p>
+                                    <div className="flex items-center justify-between mb-3">
+                                      <p className="text-xs font-semibold text-stone-400 uppercase tracking-wider">
+                                        Sessions for {row.first_name} {row.last_name}
+                                      </p>
+                                      <StatusBadge status={row.approvalStatus} />
+                                    </div>
 
-                                    {/* Edit feedback message */}
+                                    {/* Attention note for needs_attention */}
+                                    {row.approvalStatus === "needs_attention" && (
+                                      <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 mb-3">
+                                        <p className="text-xs text-amber-700 font-medium">
+                                          ⚠ This employee has open sessions or flagged entries that need review before approval.
+                                          Close any open sessions and resolve flags first.
+                                        </p>
+                                      </div>
+                                    )}
+
                                     {editMessage && (
                                       <p className={`text-sm rounded-xl px-4 py-2.5 mb-3 ${
                                         editIsError
@@ -732,19 +1063,36 @@ export default function ApprovalPage() {
 
                                     {row.sessions.map((session) => (
                                       <div key={session.id}
-                                        className="bg-white rounded-xl border border-stone-200 overflow-hidden">
+                                        className={`bg-white rounded-xl border overflow-hidden
+                                          ${session.approved
+                                            ? "border-emerald-200"
+                                            : "border-stone-200"
+                                          }`}>
 
                                         {/* ── Session display row ── */}
                                         {editingSessionId !== session.id && (
                                           <div className="px-4 py-3 flex items-start gap-3 flex-wrap">
-                                            {/* Date */}
+                                            {/* Approved indicator strip */}
+                                            {session.approved && (
+                                              <div className="w-full flex items-center gap-2 mb-1">
+                                                <span className="text-xs text-emerald-600 font-medium">
+                                                  ✓ Approved by {session.approved_by}
+                                                  {session.approved_at && (
+                                                    <span className="text-emerald-400 ml-1">
+                                                      · {new Date(session.approved_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                                                    </span>
+                                                  )}
+                                                </span>
+                                              </div>
+                                            )}
+
                                             <div className="w-28 shrink-0">
                                               <p className="text-xs text-stone-400">Date</p>
                                               <p className="text-sm font-medium text-stone-700">
                                                 {formatDate(session.work_date)}
                                               </p>
                                             </div>
-                                            {/* Times */}
+
                                             <div className="flex gap-6 flex-1">
                                               <div>
                                                 <p className="text-xs text-stone-400">Clock In</p>
@@ -760,23 +1108,46 @@ export default function ApprovalPage() {
                                                     : <span className="text-emerald-500">Still in</span>}
                                                 </p>
                                               </div>
-                                              {/* Duration */}
-                                              {session.clock_in_time && session.clock_out_time && (
-                                                <div>
-                                                  <p className="text-xs text-stone-400">Duration</p>
-                                                  <p className="text-sm text-stone-500">
-                                                    {(() => {
-                                                      const mins = Math.round(
-                                                        (new Date(session.clock_out_time).getTime() -
-                                                          new Date(session.clock_in_time).getTime()) / 60_000
-                                                      );
-                                                      return `${Math.floor(mins / 60)}h ${mins % 60}m`;
-                                                    })()}
-                                                  </p>
-                                                </div>
-                                              )}
+
+                                              {session.clock_in_time && session.clock_out_time && (() => {
+                                                const rawMins = Math.round(
+                                                  (new Date(session.clock_out_time).getTime() -
+                                                    new Date(session.clock_in_time).getTime()) / 60_000
+                                                );
+                                                const finalMins = calcSessionFinalMinutes(session);
+                                                const isOverride = session.edited_total_hours != null;
+                                                return (
+                                                  <>
+                                                    <div>
+                                                      <p className="text-xs text-stone-400">Raw Span</p>
+                                                      <p className="text-sm text-stone-500">
+                                                        {Math.floor(rawMins / 60)}h {rawMins % 60}m
+                                                      </p>
+                                                    </div>
+                                                    {(session.break_minutes ?? 0) > 0 && (
+                                                      <div>
+                                                        <p className="text-xs text-stone-400">Break</p>
+                                                        <p className="text-sm text-stone-500">
+                                                          {session.break_minutes}m
+                                                        </p>
+                                                      </div>
+                                                    )}
+                                                    <div>
+                                                      <p className="text-xs text-stone-400 flex items-center gap-1">
+                                                        Final
+                                                        {isOverride && (
+                                                          <span className="text-amber-500 font-medium">⚠ override</span>
+                                                        )}
+                                                      </p>
+                                                      <p className={`text-sm font-semibold ${isOverride ? "text-amber-600" : "text-emerald-600"}`}>
+                                                        {formatHours(finalMins)}
+                                                      </p>
+                                                    </div>
+                                                  </>
+                                                );
+                                              })()}
                                             </div>
-                                            {/* Badges */}
+
                                             <div className="shrink-0 flex items-center gap-2">
                                               <SessionBadges session={session} />
                                               <button
@@ -789,7 +1160,7 @@ export default function ApprovalPage() {
                                                 Edit
                                               </button>
                                             </div>
-                                            {/* Edit reason (shown if edited) */}
+
                                             {session.edit_reason && (
                                               <p className="w-full text-xs text-stone-400 mt-0.5">
                                                 Edit reason: <span className="italic">{session.edit_reason}</span>
@@ -800,86 +1171,207 @@ export default function ApprovalPage() {
                                                 )}
                                               </p>
                                             )}
+                                            {session.manager_note && (
+                                              <p className="w-full text-xs text-stone-400 mt-0.5">
+                                                Manager note: <span className="italic text-stone-500">{session.manager_note}</span>
+                                              </p>
+                                            )}
                                             {session.manual_add_reason && (
                                               <p className="w-full text-xs text-stone-400 mt-0.5">
                                                 Manual reason: <span className="italic">{session.manual_add_reason}</span>
                                               </p>
                                             )}
-                                          </div>
-                                        )}
-
-                                        {/* ── Edit form (replaces row when editing) ── */}
-                                        {editingSessionId === session.id && (
-                                          <div className="px-4 py-4 bg-sky-50 border-l-4 border-sky-400">
-                                            <p className="text-xs font-semibold text-sky-700 uppercase
-                                                          tracking-wider mb-3">
-                                              Editing session — {formatDate(session.work_date)}
-                                            </p>
-
-                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-                                              <div>
-                                                <label className="block text-xs font-medium text-stone-600 mb-1">
-                                                  Clock In *
-                                                </label>
-                                                <input
-                                                  type="datetime-local"
-                                                  value={editIn}
-                                                  onChange={(e) => setEditIn(e.target.value)}
-                                                  className={inputCls}
-                                                />
-                                              </div>
-                                              <div>
-                                                <label className="block text-xs font-medium text-stone-600 mb-1">
-                                                  Clock Out
-                                                </label>
-                                                <input
-                                                  type="datetime-local"
-                                                  value={editOut}
-                                                  onChange={(e) => setEditOut(e.target.value)}
-                                                  className={inputCls}
-                                                />
-                                              </div>
-                                              <div>
-                                                <label className="block text-xs font-medium text-stone-600 mb-1">
-                                                  Reason for edit *
-                                                </label>
-                                                <input
-                                                  type="text"
-                                                  value={editReason}
-                                                  onChange={(e) => setEditReason(e.target.value)}
-                                                  placeholder="e.g. Employee forgot to clock out"
-                                                  className={inputCls}
-                                                />
-                                              </div>
-                                            </div>
-
-                                            {editMessage && (
-                                              <p className={`text-xs mb-2 ${editIsError ? "text-red-600" : "text-emerald-600"}`}>
-                                                {editMessage}
+                                            {session.approval_note && (
+                                              <p className="w-full text-xs text-emerald-500 mt-0.5">
+                                                Approval note: <span className="italic">{session.approval_note}</span>
                                               </p>
                                             )}
-
-                                            <div className="flex gap-2">
-                                              <button
-                                                onClick={() => handleSaveEdit(session)}
-                                                disabled={isSavingEdit}
-                                                className="bg-sky-600 hover:bg-sky-700 text-white font-semibold
-                                                           text-xs rounded-lg px-4 py-2 transition-colors
-                                                           disabled:opacity-50"
-                                              >
-                                                {isSavingEdit ? "Saving…" : "Save Edit"}
-                                              </button>
-                                              <button
-                                                onClick={cancelEdit}
-                                                disabled={isSavingEdit}
-                                                className="text-stone-500 hover:text-stone-700 text-xs
-                                                           font-medium px-3 py-2 transition-colors"
-                                              >
-                                                Cancel
-                                              </button>
-                                            </div>
                                           </div>
                                         )}
+
+                                        {/* ── Edit form ── */}
+                                        {editingSessionId === session.id && (() => {
+                                          const previewRawMins: number | null =
+                                            editIn && editOut
+                                              ? Math.max(0,
+                                                  (new Date(editOut).getTime() -
+                                                    new Date(editIn).getTime()) / 60_000
+                                                )
+                                              : null;
+                                          const previewBreakMins = parseFloat(editBreakMins) || 0;
+                                          const isOverride = editTotalHours.trim() !== "";
+                                          const previewFinalMins: number | null = isOverride
+                                            ? (isNaN(parseFloat(editTotalHours))
+                                                ? null
+                                                : parseFloat(editTotalHours) * 60)
+                                            : previewRawMins != null
+                                              ? Math.max(0, previewRawMins - previewBreakMins)
+                                              : null;
+
+                                          const fmtMins = (m: number) =>
+                                            `${Math.floor(m / 60)}h ${Math.round(m % 60)}m`;
+
+                                          return (
+                                            <div className="px-4 py-4 bg-sky-50 border-l-4 border-sky-400">
+                                              <p className="text-xs font-semibold text-sky-700 uppercase
+                                                            tracking-wider mb-1">
+                                                Editing session — {formatDate(session.work_date)}
+                                              </p>
+                                              {session.approved && (
+                                                <p className="text-xs text-amber-600 font-medium mb-3">
+                                                  ⚠ Saving this edit will reset approval — this session will need to be re-approved.
+                                                </p>
+                                              )}
+
+                                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Clock In *
+                                                  </label>
+                                                  <input
+                                                    type="datetime-local"
+                                                    value={editIn}
+                                                    onChange={(e) => setEditIn(e.target.value)}
+                                                    className={inputCls}
+                                                  />
+                                                </div>
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Clock Out
+                                                  </label>
+                                                  <input
+                                                    type="datetime-local"
+                                                    value={editOut}
+                                                    onChange={(e) => setEditOut(e.target.value)}
+                                                    className={inputCls}
+                                                  />
+                                                </div>
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Break Minutes
+                                                    <span className="ml-1 font-normal text-stone-400">(optional)</span>
+                                                  </label>
+                                                  <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="1"
+                                                    value={editBreakMins}
+                                                    onChange={(e) => setEditBreakMins(e.target.value)}
+                                                    placeholder="e.g. 30"
+                                                    className={inputCls}
+                                                  />
+                                                  <p className="text-[10px] text-stone-400 mt-0.5">
+                                                    Deducted from worked time
+                                                  </p>
+                                                </div>
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Override Total Hours
+                                                    <span className="ml-1 font-normal text-stone-400">(optional)</span>
+                                                  </label>
+                                                  <input
+                                                    type="number"
+                                                    min="0"
+                                                    step="0.25"
+                                                    value={editTotalHours}
+                                                    onChange={(e) => setEditTotalHours(e.target.value)}
+                                                    placeholder="e.g. 7.5"
+                                                    className={inputCls}
+                                                  />
+                                                  <p className="text-[10px] text-stone-400 mt-0.5">
+                                                    Skips auto-calculation
+                                                  </p>
+                                                </div>
+                                              </div>
+
+                                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Reason for edit *
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={editReason}
+                                                    onChange={(e) => setEditReason(e.target.value)}
+                                                    placeholder="e.g. Employee forgot to clock out"
+                                                    className={inputCls}
+                                                  />
+                                                </div>
+                                                <div>
+                                                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                                                    Manager Note
+                                                    <span className="ml-1 font-normal text-stone-400">(internal, optional)</span>
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={editManagerNote}
+                                                    onChange={(e) => setEditManagerNote(e.target.value)}
+                                                    placeholder="e.g. Confirmed with employee via WhatsApp"
+                                                    className={inputCls}
+                                                  />
+                                                </div>
+                                              </div>
+
+                                              {/* Live preview */}
+                                              <div className={`rounded-xl px-4 py-2.5 mb-3 text-xs flex flex-wrap gap-x-4 gap-y-1
+                                                              ${isOverride
+                                                                ? "bg-amber-50 border border-amber-200"
+                                                                : "bg-emerald-50 border border-emerald-100"}`}>
+                                                <span className="font-semibold text-stone-500">Preview:</span>
+                                                {previewRawMins != null && (
+                                                  <span className="text-stone-500">
+                                                    Raw span: <strong>{fmtMins(previewRawMins)}</strong>
+                                                  </span>
+                                                )}
+                                                {previewBreakMins > 0 && !isOverride && (
+                                                  <span className="text-stone-500">
+                                                    Break: <strong>{previewBreakMins}m</strong>
+                                                  </span>
+                                                )}
+                                                {previewFinalMins != null ? (
+                                                  <span className={isOverride ? "text-amber-700 font-semibold" : "text-emerald-700 font-semibold"}>
+                                                    Final: {fmtMins(previewFinalMins)}
+                                                    {" "}({(previewFinalMins / 60).toFixed(2)} hrs)
+                                                    {isOverride && " ⚠ overridden"}
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-stone-400 italic">
+                                                    Enter clock-in and clock-out to preview
+                                                  </span>
+                                                )}
+                                              </div>
+
+                                              {editMessage && (
+                                                <p className={`text-xs mb-2 rounded-lg px-3 py-1.5
+                                                               ${editIsError
+                                                                 ? "bg-red-50 text-red-600"
+                                                                 : "bg-emerald-50 text-emerald-600"}`}>
+                                                  {editMessage}
+                                                </p>
+                                              )}
+
+                                              <div className="flex gap-2">
+                                                <button
+                                                  onClick={() => handleSaveEdit(session)}
+                                                  disabled={isSavingEdit}
+                                                  className="bg-sky-600 hover:bg-sky-700 text-white font-semibold
+                                                             text-xs rounded-lg px-4 py-2 transition-colors
+                                                             disabled:opacity-50"
+                                                >
+                                                  {isSavingEdit ? "Saving…" : "Save Edit"}
+                                                </button>
+                                                <button
+                                                  onClick={cancelEdit}
+                                                  disabled={isSavingEdit}
+                                                  className="text-stone-500 hover:text-stone-700 text-xs
+                                                             font-medium px-3 py-2 transition-colors"
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </div>
+                                            </div>
+                                          );
+                                        })()}
 
                                       </div>
                                     ))}
@@ -895,20 +1387,20 @@ export default function ApprovalPage() {
                   </tbody>
 
                   {/* Totals footer */}
-                  {payrollRows.length > 0 && (
+                  {sortedRows.length > 0 && (
                     <tfoot className="bg-gray-50 border-t-2 border-gray-200">
                       <tr>
                         <td colSpan={5} className="px-4 py-3 text-xs font-semibold text-stone-400 uppercase tracking-wider">
                           Totals
                         </td>
                         <td className="px-4 py-3 text-center font-bold text-stone-700">
-                          {payrollRows.reduce((s, r) => s + r.closedCount, 0)}
+                          {sortedRows.reduce((s, r) => s + r.closedCount, 0)}
                         </td>
                         <td className="px-4 py-3 font-bold text-emerald-600 whitespace-nowrap">
-                          {formatHours(payrollRows.reduce((s, r) => s + r.workedMins, 0))}
+                          {formatHours(sortedRows.reduce((s, r) => s + r.workedMins, 0))}
                         </td>
                         <td className="px-4 py-3 font-bold text-stone-500 whitespace-nowrap">
-                          {formatHours(payrollRows.reduce((s, r) => s + r.breakMins, 0))}
+                          {formatHours(sortedRows.reduce((s, r) => s + r.breakMins, 0))}
                         </td>
                         <td />
                       </tr>
@@ -957,7 +1449,6 @@ export default function ApprovalPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 
-                {/* Employee search select */}
                 <div className="sm:col-span-2 lg:col-span-1">
                   <EmployeeSearchSelect
                     employees={allStaff}
@@ -968,11 +1459,8 @@ export default function ApprovalPage() {
                   />
                 </div>
 
-                {/* Work date */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Work Date *
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Work Date *</label>
                   <input
                     type="date"
                     value={manualDate}
@@ -982,11 +1470,8 @@ export default function ApprovalPage() {
                   />
                 </div>
 
-                {/* Clock in */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Clock In Time *
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Clock In Time *</label>
                   <input
                     type="time"
                     value={manualIn}
@@ -996,7 +1481,6 @@ export default function ApprovalPage() {
                   />
                 </div>
 
-                {/* Clock out */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Clock Out Time
@@ -1010,11 +1494,8 @@ export default function ApprovalPage() {
                   />
                 </div>
 
-                {/* Reason */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Reason *
-                  </label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Reason *</label>
                   <input
                     type="text"
                     value={manualReason}
@@ -1025,7 +1506,6 @@ export default function ApprovalPage() {
                   />
                 </div>
 
-                {/* Notes */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Notes
@@ -1042,7 +1522,6 @@ export default function ApprovalPage() {
 
               </div>
 
-              {/* Feedback */}
               {manualMessage && (
                 <p className={`text-sm font-medium rounded-xl px-4 py-3 ${
                   manualIsError ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"
@@ -1066,6 +1545,89 @@ export default function ApprovalPage() {
         )}
 
       </main>
+
+      {/* ══ F. APPROVE FULL PERIOD MODAL ══════════════════════════════════════ */}
+      {showApproveAllModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.4)" }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center shrink-0">
+                <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-800">Approve Full Pay Period</h3>
+                <p className="text-xs text-stone-400 mt-0.5">
+                  This will approve all closed sessions from{" "}
+                  <span className="font-medium text-stone-600">{dateFrom}</span> to{" "}
+                  <span className="font-medium text-stone-600">{dateTo}</span>.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4">
+              <p className="text-xs text-amber-700">
+                <strong>
+                  {sessions.filter((s) => s.clock_in_time && s.clock_out_time && !s.approved).length}
+                </strong>{" "}
+                sessions will be approved.
+                {needsAttentionRows.length > 0 && (
+                  <span className="block mt-1">
+                    ⚠ <strong>{needsAttentionRows.length}</strong> employee{needsAttentionRows.length > 1 ? "s have" : " has"} open
+                    sessions or flags — their closed sessions will still be approved, but open sessions are excluded.
+                  </span>
+                )}
+              </p>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Approval Note
+                <span className="text-gray-400 font-normal ml-1">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={approveAllNote}
+                onChange={(e) => setApproveAllNote(e.target.value)}
+                placeholder="e.g. Approved for May payroll run"
+                className={inputCls}
+                disabled={isApprovingAll}
+              />
+            </div>
+
+            {approveAllError && (
+              <p className="text-sm text-red-600 bg-red-50 rounded-xl px-4 py-2.5 mb-4">
+                {approveAllError}
+              </p>
+            )}
+
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => { setShowApproveAllModal(false); setApproveAllNote(""); setApproveAllError(""); }}
+                disabled={isApprovingAll}
+                className="text-stone-500 hover:text-stone-700 font-medium text-sm px-4 py-2
+                           transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleApproveFullPeriod}
+                disabled={isApprovingAll}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white font-semibold text-sm
+                           rounded-xl px-5 py-2 transition-colors disabled:opacity-60
+                           disabled:cursor-not-allowed"
+              >
+                {isApprovingAll ? "Approving…" : "Confirm Approve All"}
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

@@ -21,7 +21,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import ManagerNav from "@/components/ManagerNav";
-import { formatEmployeeNumber, isoToDatetimeLocal, localToday } from "@/lib/time-calc";
+import { calcSessionFinalMinutes, formatEmployeeNumber, isoToDatetimeLocal, localToday } from "@/lib/time-calc";
 import { PageHeader } from "@/components/ui";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -45,9 +45,14 @@ type ClockSession = {
   status: string | null;
   edited: boolean | null;
   edited_by: string | null;
+  edited_at: string | null;
   edit_reason: string | null;
   manually_added: boolean | null;
   manual_add_reason: string | null;
+  // Time-correction columns (added by session_time_fields.sql migration)
+  break_minutes: number | null;
+  edited_total_hours: number | null;
+  manager_note: string | null;
 };
 
 type SelectedCell = {
@@ -299,19 +304,11 @@ function groupByDateAndEmployee(
 
 /**
  * calcCellHours
- * Sums total worked hours for a set of sessions on one date for one employee.
- * Only CLOSED sessions (both clock_in_time and clock_out_time present) count.
+ * Sums final payroll hours for a set of sessions on one date for one employee.
+ * Uses calcSessionFinalMinutes so break deductions and hour overrides are respected.
  */
 function calcCellHours(sessions: ClockSession[]): number {
-  const totalMins = sessions
-    .filter((s) => s.clock_in_time && s.clock_out_time)
-    .reduce((sum, s) => {
-      const ms =
-        new Date(s.clock_out_time!).getTime() -
-        new Date(s.clock_in_time!).getTime();
-      return sum + ms / 60_000;
-    }, 0);
-  return totalMins / 60;
+  return sessions.reduce((sum, s) => sum + calcSessionFinalMinutes(s), 0) / 60;
 }
 
 /** Formats an ISO timestamp to a short local time string: "08:30". */
@@ -361,6 +358,10 @@ export default function CalendarTimesPage() {
   const [editIn,           setEditIn]           = useState("");
   const [editOut,          setEditOut]          = useState("");
   const [editReason,       setEditReason]       = useState("");
+  // Time-correction fields
+  const [editBreakMins,    setEditBreakMins]    = useState("");   // "" = not set
+  const [editTotalHours,   setEditTotalHours]   = useState("");   // "" = auto-calculate
+  const [editManagerNote,  setEditManagerNote]  = useState("");
   const [isSavingEdit,     setIsSavingEdit]     = useState(false);
   const [editMessage,      setEditMessage]      = useState("");
   const [editIsError,      setEditIsError]      = useState(false);
@@ -395,7 +396,8 @@ export default function CalendarTimesPage() {
         .from("clock_sessions")
         .select(
           "id, staff_id, work_date, clock_in_time, clock_out_time, status, " +
-          "edited, edited_by, edit_reason, manually_added, manual_add_reason"
+          "edited, edited_by, edited_at, edit_reason, manually_added, manual_add_reason, " +
+          "break_minutes, edited_total_hours, manager_note"
         )
         .gte("work_date", from)
         .lte("work_date", to)
@@ -453,6 +455,10 @@ export default function CalendarTimesPage() {
     setEditIn(isoToDatetimeLocal(session.clock_in_time));
     setEditOut(isoToDatetimeLocal(session.clock_out_time));
     setEditReason("");
+    // Pre-populate time-correction fields from any previous edit
+    setEditBreakMins(session.break_minutes != null ? String(session.break_minutes) : "");
+    setEditTotalHours(session.edited_total_hours != null ? String(session.edited_total_hours) : "");
+    setEditManagerNote(session.manager_note ?? "");
     setEditMessage("");
   }
 
@@ -461,10 +467,14 @@ export default function CalendarTimesPage() {
     setEditIn("");
     setEditOut("");
     setEditReason("");
+    setEditBreakMins("");
+    setEditTotalHours("");
+    setEditManagerNote("");
     setEditMessage("");
   }
 
   async function handleSaveEdit(session: ClockSession) {
+    // ── Validation ──────────────────────────────────────────────────────────────
     if (!editIn) {
       setEditMessage("Clock-in time is required.");
       setEditIsError(true);
@@ -485,20 +495,44 @@ export default function CalendarTimesPage() {
       return;
     }
 
+    // Parse optional time-correction fields
+    const newBreakMins: number | null =
+      editBreakMins.trim() !== "" ? parseInt(editBreakMins, 10) : null;
+    const newTotalHours: number | null =
+      editTotalHours.trim() !== "" ? parseFloat(editTotalHours) : null;
+
+    if (newBreakMins !== null && (isNaN(newBreakMins) || newBreakMins < 0)) {
+      setEditMessage("Break minutes must be a positive whole number.");
+      setEditIsError(true);
+      return;
+    }
+    if (newTotalHours !== null && (isNaN(newTotalHours) || newTotalHours < 0)) {
+      setEditMessage("Override total hours must be a positive number (e.g. 7.5).");
+      setEditIsError(true);
+      return;
+    }
+
+    const newManagerNote: string | null = editManagerNote.trim() || null;
+    const now = new Date().toISOString();
+
     setIsSavingEdit(true);
     setEditMessage("");
 
-    // 1. Update clock_sessions row
+    // ── 1. Update clock_sessions row ────────────────────────────────────────────
     const { error: updateError } = await supabase
       .from("clock_sessions")
       .update({
-        clock_in_time:  newClockIn,
-        clock_out_time: newClockOut,
-        status:         newClockOut ? "clocked_out" : "clocked_in",
-        edited:         true,
-        edited_by:      "Manager",
-        edited_at:      new Date().toISOString(),
-        edit_reason:    editReason.trim(),
+        clock_in_time:      newClockIn,
+        clock_out_time:     newClockOut,
+        status:             newClockOut ? "clocked_out" : "clocked_in",
+        edited:             true,
+        edited_by:          "Manager",
+        edited_at:          now,
+        edit_reason:        editReason.trim(),
+        // Time-correction fields
+        break_minutes:      newBreakMins,
+        edited_total_hours: newTotalHours,
+        manager_note:       newManagerNote,
       })
       .eq("id", session.id);
 
@@ -509,32 +543,42 @@ export default function CalendarTimesPage() {
       return;
     }
 
-    // 2. Write to audit log
+    // ── 2. Write to audit log (records old AND new values) ───────────────────────
     await supabase.from("time_edit_log").insert({
-      clock_session_id:   session.id,
-      staff_id:           session.staff_id,
-      old_clock_in_time:  session.clock_in_time,
-      old_clock_out_time: session.clock_out_time,
-      new_clock_in_time:  newClockIn,
-      new_clock_out_time: newClockOut,
-      action_type:        "edit",
-      changed_by:         "Manager",
-      reason:             editReason.trim(),
+      clock_session_id:       session.id,
+      staff_id:               session.staff_id,
+      old_clock_in_time:      session.clock_in_time,
+      old_clock_out_time:     session.clock_out_time,
+      new_clock_in_time:      newClockIn,
+      new_clock_out_time:     newClockOut,
+      old_break_minutes:      session.break_minutes ?? null,
+      new_break_minutes:      newBreakMins,
+      old_edited_total_hours: session.edited_total_hours ?? null,
+      new_edited_total_hours: newTotalHours,
+      old_manager_note:       session.manager_note ?? null,
+      new_manager_note:       newManagerNote,
+      action_type:            "edit",
+      changed_by:             "Manager",
+      reason:                 editReason.trim(),
     });
 
-    // 3. Update local state — avoids a full reload
+    // ── 3. Update local state — avoids a full reload ─────────────────────────────
     setSessions((prev) =>
       prev.map((s) =>
         s.id !== session.id
           ? s
           : {
               ...s,
-              clock_in_time:  newClockIn,
-              clock_out_time: newClockOut,
-              status:         newClockOut ? "clocked_out" : "clocked_in",
-              edited:         true,
-              edited_by:      "Manager",
-              edit_reason:    editReason.trim(),
+              clock_in_time:      newClockIn,
+              clock_out_time:     newClockOut,
+              status:             newClockOut ? "clocked_out" : "clocked_in",
+              edited:             true,
+              edited_by:          "Manager",
+              edited_at:          now,
+              edit_reason:        editReason.trim(),
+              break_minutes:      newBreakMins,
+              edited_total_hours: newTotalHours,
+              manager_note:       newManagerNote,
             }
       )
     );
@@ -631,13 +675,8 @@ export default function CalendarTimesPage() {
 
   function employeePeriodHours(staffId: string): number {
     return sessions
-      .filter((s) => s.staff_id === staffId && s.clock_in_time && s.clock_out_time)
-      .reduce((sum, s) => {
-        const ms =
-          new Date(s.clock_out_time!).getTime() -
-          new Date(s.clock_in_time!).getTime();
-        return sum + ms / 60_000;
-      }, 0) / 60;
+      .filter((s) => s.staff_id === staffId)
+      .reduce((sum, s) => sum + calcSessionFinalMinutes(s), 0) / 60;
   }
 
   const grandTotalHours = staffList.reduce(
@@ -1192,16 +1231,44 @@ export default function CalendarTimesPage() {
                                       : "Still in"}
                                   </p>
                                 </div>
-                                {closedMins !== null && (
-                                  <div className="ml-auto">
-                                    <p className="text-[10px] text-stone-400 uppercase tracking-wide">
-                                      Duration
-                                    </p>
-                                    <p className="text-sm font-semibold text-emerald-700">
-                                      {fmtDuration(closedMins)}
-                                    </p>
-                                  </div>
-                                )}
+                                {closedMins !== null && (() => {
+                                  const finalMins = calcSessionFinalMinutes(session);
+                                  const isOverride = session.edited_total_hours != null;
+                                  return (
+                                    <>
+                                      <div className="ml-auto">
+                                        <p className="text-[10px] text-stone-400 uppercase tracking-wide">
+                                          Raw Span
+                                        </p>
+                                        <p className="text-sm font-semibold text-stone-500">
+                                          {fmtDuration(closedMins)}
+                                        </p>
+                                      </div>
+                                      {(session.break_minutes ?? 0) > 0 && (
+                                        <div>
+                                          <p className="text-[10px] text-stone-400 uppercase tracking-wide">
+                                            Break
+                                          </p>
+                                          <p className="text-sm font-semibold text-stone-500">
+                                            {session.break_minutes}m
+                                          </p>
+                                        </div>
+                                      )}
+                                      <div>
+                                        <p className="text-[10px] uppercase tracking-wide flex items-center gap-1
+                                                      text-stone-400">
+                                          Final
+                                          {isOverride && (
+                                            <span className="text-amber-500">⚠</span>
+                                          )}
+                                        </p>
+                                        <p className={`text-sm font-semibold ${isOverride ? "text-amber-600" : "text-emerald-700"}`}>
+                                          {fmtDuration(finalMins)}
+                                        </p>
+                                      </div>
+                                    </>
+                                  );
+                                })()}
                               </div>
 
                               <div className="flex items-center gap-2 flex-wrap">
@@ -1234,6 +1301,12 @@ export default function CalendarTimesPage() {
                                   <span className="italic">{session.edit_reason}</span>
                                 </p>
                               )}
+                              {session.manager_note && (
+                                <p className="text-[11px] text-stone-400">
+                                  Manager note:{" "}
+                                  <span className="italic text-stone-500">{session.manager_note}</span>
+                                </p>
+                              )}
                               {session.manual_add_reason && (
                                 <p className="text-[11px] text-stone-400">
                                   Manual reason:{" "}
@@ -1244,80 +1317,187 @@ export default function CalendarTimesPage() {
                           )}
 
                           {/* Inline edit form */}
-                          {isEditing && (
-                            <div className="px-4 py-4 bg-sky-50 border-l-4 border-sky-400">
-                              <p className="text-xs font-bold text-sky-700 uppercase
-                                            tracking-wider mb-3">
-                                Editing session
-                              </p>
-                              <div className="space-y-3">
-                                <div>
-                                  <label className="block text-xs font-medium text-stone-600 mb-1">
-                                    Clock In *
-                                  </label>
-                                  <input
-                                    type="datetime-local"
-                                    value={editIn}
-                                    onChange={(e) => setEditIn(e.target.value)}
-                                    className={inputCls}
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-medium text-stone-600 mb-1">
-                                    Clock Out
-                                  </label>
-                                  <input
-                                    type="datetime-local"
-                                    value={editOut}
-                                    onChange={(e) => setEditOut(e.target.value)}
-                                    className={inputCls}
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-xs font-medium text-stone-600 mb-1">
-                                    Reason *
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={editReason}
-                                    onChange={(e) => setEditReason(e.target.value)}
-                                    placeholder="e.g. Employee forgot to clock out"
-                                    className={inputCls}
-                                  />
-                                </div>
+                          {isEditing && (() => {
+                            // Live preview — recalculated on every keystroke
+                            const previewRawMins: number | null =
+                              editIn && editOut
+                                ? Math.max(0,
+                                    (new Date(editOut).getTime() -
+                                      new Date(editIn).getTime()) / 60_000
+                                  )
+                                : null;
+                            const previewBreakMins = parseFloat(editBreakMins) || 0;
+                            const isOverride = editTotalHours.trim() !== "";
+                            const previewFinalMins: number | null = isOverride
+                              ? (isNaN(parseFloat(editTotalHours))
+                                  ? null
+                                  : parseFloat(editTotalHours) * 60)
+                              : previewRawMins != null
+                                ? Math.max(0, previewRawMins - previewBreakMins)
+                                : null;
 
-                                {editMessage && (
-                                  <p className={`text-xs font-medium rounded-lg px-3 py-2 ${
-                                    editIsError
-                                      ? "bg-red-50 text-red-600"
-                                      : "bg-emerald-50 text-emerald-700"
-                                  }`}>
-                                    {editMessage}
-                                  </p>
-                                )}
+                            return (
+                              <div className="px-4 py-4 bg-sky-50 border-l-4 border-sky-400">
+                                <p className="text-xs font-bold text-sky-700 uppercase
+                                              tracking-wider mb-3">
+                                  Editing session
+                                </p>
+                                <div className="space-y-3">
 
-                                <div className="flex gap-2 pt-1">
-                                  <button
-                                    onClick={() => handleSaveEdit(session)}
-                                    disabled={isSavingEdit}
-                                    className="bg-sky-600 hover:bg-sky-700 text-white font-semibold
-                                               text-xs rounded-lg px-4 py-2 transition-colors
-                                               disabled:opacity-50"
-                                  >
-                                    {isSavingEdit ? "Saving…" : "Save"}
-                                  </button>
-                                  <button
-                                    onClick={cancelEdit}
-                                    disabled={isSavingEdit}
-                                    className="text-stone-500 hover:text-stone-700 text-xs
-                                               font-medium px-3 py-2 transition-colors"
-                                  >
-                                    Cancel
-                                  </button>
+                                  {/* Clock times */}
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="block text-xs font-medium text-stone-600 mb-1">
+                                        Clock In *
+                                      </label>
+                                      <input
+                                        type="datetime-local"
+                                        value={editIn}
+                                        onChange={(e) => setEditIn(e.target.value)}
+                                        className={inputCls}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs font-medium text-stone-600 mb-1">
+                                        Clock Out
+                                      </label>
+                                      <input
+                                        type="datetime-local"
+                                        value={editOut}
+                                        onChange={(e) => setEditOut(e.target.value)}
+                                        className={inputCls}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  {/* Break + override */}
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="block text-xs font-medium text-stone-600 mb-1">
+                                        Break Minutes
+                                        <span className="ml-1 font-normal text-stone-400">(opt)</span>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="1"
+                                        value={editBreakMins}
+                                        onChange={(e) => setEditBreakMins(e.target.value)}
+                                        placeholder="e.g. 30"
+                                        className={inputCls}
+                                      />
+                                      <p className="text-[10px] text-stone-400 mt-0.5">
+                                        Deducted from worked time
+                                      </p>
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs font-medium text-stone-600 mb-1">
+                                        Override Hours
+                                        <span className="ml-1 font-normal text-stone-400">(opt)</span>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.25"
+                                        value={editTotalHours}
+                                        onChange={(e) => setEditTotalHours(e.target.value)}
+                                        placeholder="e.g. 7.5"
+                                        className={inputCls}
+                                      />
+                                      <p className="text-[10px] text-stone-400 mt-0.5">
+                                        Skips auto-calculation
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  {/* Live preview */}
+                                  {(previewRawMins != null || previewFinalMins != null) && (
+                                    <div className={`rounded-lg px-3 py-2 text-xs flex flex-wrap gap-x-3 gap-y-1
+                                                    ${isOverride
+                                                      ? "bg-amber-50 border border-amber-200"
+                                                      : "bg-emerald-50 border border-emerald-100"}`}>
+                                      <span className="text-stone-400 font-semibold">Preview:</span>
+                                      {previewRawMins != null && (
+                                        <span className="text-stone-500">
+                                          Raw: <strong>{fmtDuration(previewRawMins)}</strong>
+                                        </span>
+                                      )}
+                                      {previewBreakMins > 0 && !isOverride && (
+                                        <span className="text-stone-500">
+                                          Break: <strong>{previewBreakMins}m</strong>
+                                        </span>
+                                      )}
+                                      {previewFinalMins != null && (
+                                        <span className={`font-semibold ${isOverride ? "text-amber-700" : "text-emerald-700"}`}>
+                                          Final: {fmtDuration(previewFinalMins)}
+                                          {isOverride && " ⚠ override"}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* Reason */}
+                                  <div>
+                                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                                      Reason *
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={editReason}
+                                      onChange={(e) => setEditReason(e.target.value)}
+                                      placeholder="e.g. Employee forgot to clock out"
+                                      className={inputCls}
+                                    />
+                                  </div>
+
+                                  {/* Manager note */}
+                                  <div>
+                                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                                      Manager Note
+                                      <span className="ml-1 font-normal text-stone-400">(internal, opt)</span>
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={editManagerNote}
+                                      onChange={(e) => setEditManagerNote(e.target.value)}
+                                      placeholder="e.g. Confirmed via WhatsApp"
+                                      className={inputCls}
+                                    />
+                                  </div>
+
+                                  {editMessage && (
+                                    <p className={`text-xs font-medium rounded-lg px-3 py-2 ${
+                                      editIsError
+                                        ? "bg-red-50 text-red-600"
+                                        : "bg-emerald-50 text-emerald-700"
+                                    }`}>
+                                      {editMessage}
+                                    </p>
+                                  )}
+
+                                  <div className="flex gap-2 pt-1">
+                                    <button
+                                      onClick={() => handleSaveEdit(session)}
+                                      disabled={isSavingEdit}
+                                      className="bg-sky-600 hover:bg-sky-700 text-white font-semibold
+                                                 text-xs rounded-lg px-4 py-2 transition-colors
+                                                 disabled:opacity-50"
+                                    >
+                                      {isSavingEdit ? "Saving…" : "Save"}
+                                    </button>
+                                    <button
+                                      onClick={cancelEdit}
+                                      disabled={isSavingEdit}
+                                      className="text-stone-500 hover:text-stone-700 text-xs
+                                                 font-medium px-3 py-2 transition-colors"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            );
+                          })()}
                         </div>
                       );
                     })}

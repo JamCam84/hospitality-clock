@@ -517,6 +517,23 @@ export default function ClockPage({
                 : "Tap Clock In when your shift starts."}
             </p>
 
+            {/* View My Times link */}
+            <a
+              href={`/clock/${staffId}/times`}
+              className="w-full flex items-center justify-center gap-2
+                         bg-white border border-gray-200 rounded-2xl py-3.5
+                         text-gray-500 text-sm font-semibold
+                         hover:border-green-300 hover:text-green-600
+                         active:scale-95 transition-all duration-150 shadow-sm"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor"
+                strokeWidth={2} viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="18" rx="2" />
+                <path strokeLinecap="round" d="M16 2v4M8 2v4M3 10h18" />
+              </svg>
+              View My Times
+            </a>
+
           </>
         )}
 
