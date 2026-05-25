@@ -380,7 +380,7 @@ export default function LocationViewPage() {
 
   // Auto-load on mount
   useEffect(() => {
-    loadData();
+    loadData(); // eslint-disable-line react-hooks/set-state-in-effect
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Lookup maps ───────────────────────────────────────────────────────────

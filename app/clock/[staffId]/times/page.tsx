@@ -158,6 +158,7 @@ export default function MyTimesPage({
 
   useEffect(() => {
     if (!staffId || staffId.trim() === "") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setErrorMsg("Invalid staff link.");
       setIsLoading(false);
       return;

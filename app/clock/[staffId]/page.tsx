@@ -3,17 +3,21 @@
 /**
  * app/clock/[staffId]/page.tsx  —  Gamified Clock UI
  *
- * Designed to make staff WANT to clock in.
- * Feels like Duolingo + Uber Driver + modern SaaS — premium, addictive, smooth.
+ * Design goal: make staff WANT to clock in.
+ * Feels like Duolingo + Uber Driver + premium SaaS.
  *
- * Animation stack: CSS @keyframes + Web Animations API + canvas confetti.
- * (Framer Motion is listed as a dependency in package.json but the registry is
- * blocked in this environment — equivalent quality achieved with CSS.)
+ * Animation stack (no external packages required):
+ *   • CSS @keyframes via globals.css
+ *   • Web Animations API for one-shot programmatic tweens
+ *   • Canvas particle confetti (fires from button center)
+ *   • navigator.vibrate() for haptic feedback on mobile
+ *   • Pointer-event ripple originating from tap point
+ *   • will-change: transform/opacity on all GPU-composited elements
  *
- * ─── CRITICAL: ALL SUPABASE LOGIC IS PRESERVED EXACTLY ────────────────────
- * Only the render layer has changed. Every field written to clock_sessions
- * (clock_in_time, location fields, reminder fields, etc.) is identical to the
- * original. The existing reminder modal interval logic is also unchanged.
+ * ─────────────────────────────────────────────────────────────────────
+ * ALL SUPABASE LOGIC IS UNCHANGED. Every field written to clock_sessions
+ * and every reminder-modal interaction is identical to the original.
+ * ─────────────────────────────────────────────────────────────────────
  */
 
 import { use, useCallback, useEffect, useRef, useState } from "react";
@@ -43,140 +47,114 @@ type OpenSession = ReminderSessionFields & {
 };
 
 type LocationResult = {
-  latitude:            number | null;
-  longitude:           number | null;
-  accuracy:            number | null;
-  location_status:     "granted" | "denied" | "unavailable";
-  suspicious:          boolean;
-  suspicious_reason:   "ok" | "permission_denied" | "location_unavailable" | "low_accuracy";
+  latitude:           number | null;
+  longitude:          number | null;
+  accuracy:           number | null;
+  location_status:    "granted" | "denied" | "unavailable";
+  suspicious:         boolean;
+  suspicious_reason:  "ok" | "permission_denied" | "location_unavailable" | "low_accuracy";
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GAMIFICATION CONTENT
+// GAMIFICATION DATA
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Mood = {
   label:    string;
   emoji:    string;
   greeting: string;
-  color:    string;  // hex for canvas / inline use
-  ring:     string;  // CSS ring colour class
-  glow:     string;  // glow animation class
-  from:     string;  // tailwind gradient-from
-  to:       string;  // tailwind gradient-to
-  bg:       string;  // success overlay bg
+  from:     string;   // tw gradient-from class
+  to:       string;   // tw gradient-to class
+  ring:     string;   // ring border colour (rgba)
+  glow:     string;   // glow animation class
 };
 
-const MOODS: readonly Mood[] = [
-  {
-    label: "Early Shift Hero",     emoji: "🌅",
-    greeting: "Rising before the world — absolute legend.",
-    color: "#f97316", ring: "border-orange-500/40", glow: "animate-glow-green",
-    from: "from-orange-500", to: "to-amber-400", bg: "from-orange-900",
-    hours: [5,6,7,8],
-  } as Mood & { hours: number[] },
-  {
-    label: "Morning Grinder",      emoji: "☕",
-    greeting: "Coffee optional. Dedication mandatory.",
-    color: "#f59e0b", ring: "border-amber-500/40", glow: "animate-glow-green",
-    from: "from-amber-500", to: "to-yellow-400", bg: "from-amber-900",
-    hours: [9,10,11],
-  } as Mood & { hours: number[] },
-  {
-    label: "Lunch Escape Artist",  emoji: "🥗",
-    greeting: "The midday maestro has entered the building.",
-    color: "#10b981", ring: "border-emerald-500/40", glow: "animate-glow-green",
-    from: "from-emerald-500", to: "to-teal-400", bg: "from-emerald-900",
-    hours: [12,13],
-  } as Mood & { hours: number[] },
-  {
-    label: "Afternoon Ace",        emoji: "⚡",
-    greeting: "Second half? You OWN the second half.",
-    color: "#3b82f6", ring: "border-blue-500/40", glow: "animate-glow-green",
-    from: "from-blue-500", to: "to-cyan-400", bg: "from-blue-900",
-    hours: [14,15,16,17],
-  } as Mood & { hours: number[] },
-  {
-    label: "Overtime Warrior",     emoji: "🔥",
-    greeting: "They asked for extra. You delivered.",
-    color: "#f43f5e", ring: "border-rose-500/40", glow: "animate-glow-red",
-    from: "from-rose-500", to: "to-orange-400", bg: "from-rose-900",
-    hours: [18,19,20,21],
-  } as Mood & { hours: number[] },
-  {
-    label: "Night Owl",            emoji: "🦉",
-    greeting: "When the world sleeps, legends work.",
-    color: "#8b5cf6", ring: "border-violet-500/40", glow: "animate-glow-green",
-    from: "from-violet-600", to: "to-purple-500", bg: "from-violet-900",
-    hours: [22,23,0,1,2,3,4],
-  } as Mood & { hours: number[] },
-] as unknown as Mood[];
+// Indexed by MOOD_HOURS below for O(1) lookup
+const MOODS: Mood[] = [
+  { label: "Early Shift Hero",    emoji: "🌅", greeting: "Rising before the world — absolute respect.",
+    from: "from-orange-500", to: "to-amber-400",
+    ring: "rgba(249,115,22,0.45)", glow: "animate-glow-green" },
+  { label: "Morning Grinder",     emoji: "☕", greeting: "Coffee optional. Dedication mandatory.",
+    from: "from-amber-500",  to: "to-yellow-400",
+    ring: "rgba(245,158,11,0.45)", glow: "animate-glow-green" },
+  { label: "Lunch Escape Artist", emoji: "🥗", greeting: "The midday maestro has entered the building.",
+    from: "from-emerald-500", to: "to-teal-400",
+    ring: "rgba(16,185,129,0.45)", glow: "animate-glow-green" },
+  { label: "Afternoon Ace",       emoji: "⚡", greeting: "Second half? You OWN the second half.",
+    from: "from-blue-500",   to: "to-cyan-400",
+    ring: "rgba(59,130,246,0.45)", glow: "animate-glow-green" },
+  { label: "Overtime Warrior",    emoji: "🔥", greeting: "They asked for extra — you delivered.",
+    from: "from-rose-500",   to: "to-orange-400",
+    ring: "rgba(244,63,94,0.45)",  glow: "animate-glow-red" },
+  { label: "Night Owl",           emoji: "🦉", greeting: "When the world sleeps, legends work.",
+    from: "from-violet-600", to: "to-purple-500",
+    ring: "rgba(139,92,246,0.45)", glow: "animate-glow-green" },
+];
 
-// We need to access hours on the mood objects at runtime:
-const MOOD_HOURS: number[][] = [
+const MOOD_HOURS: readonly number[][] = [
   [5,6,7,8], [9,10,11], [12,13], [14,15,16,17], [18,19,20,21], [22,23,0,1,2,3,4],
 ];
 
 function getMood(): Mood {
-  const h = new Date().getHours();
+  const h   = new Date().getHours();
   const idx = MOOD_HOURS.findIndex((hrs) => hrs.includes(h));
   return MOODS[idx >= 0 ? idx : 3];
 }
 
-// Messages shown before clocking in
-const PRECLOCK_MESSAGES: readonly string[] = [
+// Pre-clock-in motivational messages
+const PRECLOCK: readonly string[] = [
   "Ready to be today's MVP? 🏆",
-  "The team is counting on you. Let's go! 💪",
+  "The team is counting on you. LFG! 💪",
   "Your guests are waiting. Time to shine ✨",
   "Another day to be unreasonably good at this 🎯",
   "Plot twist: you're the best one here 🎭",
   "Making hospitality look easy since day one 😎",
   "The shift doesn't start until you do 🚀",
-  "Go on — you know they can't do it without you 👑",
+  "They genuinely cannot do it without you 👑",
 ];
 
-// Messages shown while clocked in (changes based on hours)
+// AI-style comment based on hours worked
 const SHIFT_COMMENTS: readonly { maxH: number; msg: string }[] = [
-  { maxH: 1,   msg: "Just getting warmed up! 🌱" },
-  { maxH: 2,   msg: "Finding that flow state 🌊" },
-  { maxH: 3,   msg: "You're locked in now 🔒" },
-  { maxH: 4.5, msg: "Halfway through — crushing it 💪" },
-  { maxH: 6,   msg: "Deep in the zone. Respect 🎯" },
-  { maxH: 7.5, msg: "Almost legendary — keep going 🏆" },
+  { maxH: 0.5, msg: "Warming up the engines 🚀" },
+  { maxH: 1.5, msg: "Just finding that flow state 🌊" },
+  { maxH: 2.5, msg: "Locked in. Nothing stops you now 🔒" },
+  { maxH: 4,   msg: "Halfway through — absolutely crushing it 💪" },
+  { maxH: 5.5, msg: "Deep in the zone. Pure respect 🎯" },
+  { maxH: 7,   msg: "Almost legendary — final stretch! 🏆" },
   { maxH: 99,  msg: "Full shift warrior. Absolute unit 🔥" },
 ];
 
-// Clock-out celebration messages
 const CLOCKOUT_QUIPS: readonly string[] = [
-  "Absolute legend. See you soon! 🏆",
-  "Another day dominated. Go rest — you've earned it 💤",
+  "Absolute legend. Rest up — you've earned it! 🏆",
+  "Another day dominated. Go sleep 💤",
   "The guests will be talking about tonight 🌟",
   "That shift? Totally carried 🎯",
   "You showed up. You delivered. Enough said 💪",
   "Hospitality GOAT confirmed 🐐",
   "Smashed it from start to finish 🔥",
+  "The place ran better because you were here ✨",
 ];
 
 type Badge = { id: string; emoji: string; label: string; desc: string };
 
 const BADGES: readonly Badge[] = [
-  { id: "timing",  emoji: "⏱️", label: "Perfect Timing",    desc: "Clocked in right on the dot" },
-  { id: "streak",  emoji: "🔥", label: "7-Day Streak",       desc: "7 days straight — a machine" },
-  { id: "early",   emoji: "🐦", label: "Early Bird",         desc: "First one through the door today" },
-  { id: "weekend", emoji: "⚔️", label: "Weekend Warrior",    desc: "Working while others sleep in" },
-  { id: "boss",    emoji: "☕", label: "Break Boss",          desc: "Perfectly paced rest periods" },
-  { id: "night",   emoji: "🦉", label: "Night Owl",          desc: "Late shift legend, zero complaints" },
-  { id: "clean",   emoji: "✅", label: "No Late Clock-ins",  desc: "Always on time this month" },
+  { id: "timing",  emoji: "⏱️", label: "Perfect Timing",   desc: "Clocked in right on the dot" },
+  { id: "streak",  emoji: "🔥", label: "7-Day Streak",      desc: "7 consecutive shifts — a machine" },
+  { id: "early",   emoji: "🐦", label: "Early Bird",        desc: "First one through the door today" },
+  { id: "weekend", emoji: "⚔️", label: "Weekend Warrior",   desc: "Working while others sleep in" },
+  { id: "boss",    emoji: "☕", label: "Break Boss",         desc: "Perfectly paced rest periods" },
+  { id: "night",   emoji: "🦉", label: "Night Owl",         desc: "Late shift, zero complaints" },
+  { id: "clean",   emoji: "✅", label: "No Late Clock-ins", desc: "Always on time this month" },
 ];
 
-// Mock gamification state — replace with real DB values when gamification backend is ready
-const MOCK_STREAK    = 7;
-const MOCK_LEVEL     = 5;
-const MOCK_XP        = 1240;
-const MOCK_XP_MAX    = 2000;
-const XP_PER_SHIFT   = 75;
-const SHIFT_HOURS    = 8;      // target shift length for the progress ring
-const HOURLY_RATE    = 85;     // ZAR placeholder shown with disclaimer
+// Mock gamification state — wire to real DB when backend is ready
+const MOCK_STREAK  = 7;
+const MOCK_LEVEL   = 5;
+const MOCK_XP      = 1240;
+const MOCK_XP_MAX  = 2000;
+const XP_PER_SHIFT = 75;
+const SHIFT_HOURS  = 8;    // target hours (progress ring target)
+const HOURLY_RATE  = 85;   // ZAR placeholder
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -215,10 +193,9 @@ function formatHHMM(date: Date): string {
 }
 
 function formatDuration(ms: number): string {
-  const totalMin = Math.floor(ms / 60_000);
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  return h === 0 ? `${m}m` : `${h}h ${String(m).padStart(2, "0")}m`;
+  const m = Math.floor(ms / 60_000);
+  const h = Math.floor(m / 60);
+  return h === 0 ? `${m}m` : `${h}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
 function pickRandom<T>(arr: readonly T[]): T {
@@ -230,12 +207,19 @@ function getShiftComment(ms: number): string {
   return (SHIFT_COMMENTS.find((c) => h < c.maxH) ?? SHIFT_COMMENTS.at(-1)!).msg;
 }
 
+/** Haptic feedback — silently no-ops on unsupported devices */
+function vibrate(pattern: number | number[]): void {
+  try { (navigator as Navigator & { vibrate?: (p: number | number[]) => void })
+    .vibrate?.(pattern); } catch { /* ignore */ }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Canvas Confetti
-// Fires from the button's screen position. No library needed.
+// CANVAS CONFETTI
+// Fires as two staggered bursts from the button's screen position.
+// Uses GPU-composited canvas only — zero DOM overhead.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type BurstFn = (originX: number, originY: number) => void;
+type BurstFn = (ox: number, oy: number) => void;
 
 function ConfettiCanvas({ burstRef }: { burstRef: React.MutableRefObject<BurstFn | null> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -250,39 +234,52 @@ function ConfettiCanvas({ burstRef }: { burstRef: React.MutableRefObject<BurstFn
     canvas.width  = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    const COLORS = ["#f59e0b","#10b981","#3b82f6","#ec4899","#8b5cf6","#f97316","#06b6d4","#a3e635"];
-    const N = 110;
+    const COLORS = [
+      "#f59e0b","#10b981","#3b82f6","#ec4899","#8b5cf6",
+      "#f97316","#06b6d4","#a3e635","#fb923c","#34d399",
+    ];
 
-    const particles = Array.from({ length: N }, () => {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 22 + 8;
-      return {
-        x:     ox,
-        y:     oy,
-        vx:    Math.cos(angle) * speed,
-        vy:    Math.sin(angle) * speed - 12,   // bias upward
-        color: COLORS[Math.floor(Math.random() * COLORS.length)],
-        w:     Math.random() * 11 + 5,
-        h:     Math.random() * 6 + 2,
-        rot:   Math.random() * Math.PI * 2,
-        spin:  (Math.random() - 0.5) * 0.35,
-        g:     0.42,
-        alpha: 1,
-        fade:  0.013 + Math.random() * 0.009,
-      };
-    });
+    function makeParticles(n: number, speedMult: number) {
+      return Array.from({ length: n }, () => {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (Math.random() * 20 + 9) * speedMult;
+        return {
+          x: ox, y: oy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 14 * speedMult,
+          color: COLORS[Math.floor(Math.random() * COLORS.length)],
+          w: Math.random() * 12 + 5,
+          h: Math.random() * 6  + 2,
+          rot:  Math.random() * Math.PI * 2,
+          spin: (Math.random() - 0.5) * 0.38,
+          g:    0.44,
+          alpha: 1,
+          fade: 0.012 + Math.random() * 0.01,
+        };
+      });
+    }
+
+    // Two waves: immediate burst + smaller delayed burst
+    let particles = makeParticles(100, 1);
+    let wave2Added = false;
 
     cancelAnimationFrame(animRef.current);
+    let frame = 0;
 
     function draw() {
+      frame++;
+      // Add second smaller wave at frame ~18 (~300 ms)
+      if (frame === 18 && !wave2Added) {
+        particles = [...particles, ...makeParticles(45, 0.7)];
+        wave2Added = true;
+      }
+
       ctx!.clearRect(0, 0, canvas!.width, canvas!.height);
       let alive = false;
       for (const p of particles) {
-        p.x  += p.vx;
-        p.y  += p.vy;
-        p.vy += p.g;
-        p.vx *= 0.987;
-        p.rot  += p.spin;
+        p.x  += p.vx;  p.y  += p.vy;
+        p.vy += p.g;   p.vx *= 0.988;
+        p.rot   += p.spin;
         p.alpha -= p.fade;
         if (p.alpha <= 0) continue;
         alive = true;
@@ -297,7 +294,6 @@ function ConfettiCanvas({ burstRef }: { burstRef: React.MutableRefObject<BurstFn
       if (alive) animRef.current = requestAnimationFrame(draw);
       else ctx!.clearRect(0, 0, canvas!.width, canvas!.height);
     }
-
     draw();
   }, []);
 
@@ -307,62 +303,65 @@ function ConfettiCanvas({ burstRef }: { burstRef: React.MutableRefObject<BurstFn
     <canvas
       ref={canvasRef}
       className="fixed inset-0 pointer-events-none"
-      style={{ zIndex: 60, width: "100%", height: "100%" }}
+      style={{ zIndex: 55, width: "100%", height: "100%" }}
       aria-hidden
     />
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Floating ambient orbs
+// FLOATING AMBIENT ORBS
 // ─────────────────────────────────────────────────────────────────────────────
 
 function FloatingOrbs({ mood }: { mood: Mood }) {
   return (
     <div className="fixed inset-0 overflow-hidden pointer-events-none" aria-hidden>
       <div
-        className={`absolute -top-40 -left-28 w-96 h-96 rounded-full blur-3xl opacity-20
+        className={`absolute -top-44 -left-32 w-[420px] h-[420px] rounded-full
+                    blur-3xl opacity-[0.18]
                     bg-gradient-to-br ${mood.from} ${mood.to} animate-orb-a`}
+        style={{ willChange: "transform" }}
       />
       <div
-        className="absolute top-1/3 -right-32 w-80 h-80 rounded-full blur-3xl opacity-12
+        className="absolute top-[30%] -right-36 w-[340px] h-[340px] rounded-full
+                   blur-3xl opacity-[0.12]
                    bg-gradient-to-br from-violet-600 to-indigo-500 animate-orb-b"
+        style={{ willChange: "transform" }}
       />
       <div
-        className="absolute -bottom-24 left-1/3 w-80 h-80 rounded-full blur-3xl opacity-10
+        className="absolute -bottom-28 left-[25%] w-[380px] h-[380px] rounded-full
+                   blur-3xl opacity-[0.10]
                    bg-gradient-to-br from-blue-700 to-cyan-600 animate-orb-c"
+        style={{ willChange: "transform" }}
       />
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: SVG progress ring with hour tick marks
+// PROGRESS RING
+// SVG arc + hour tick marks. Arc glows with drop-shadow filter.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ProgressRing({ ms, size = 232 }: { ms: number; size?: number }) {
-  const stroke  = 7;
-  const cx = size / 2;
-  const cy = size / 2;
-  const r  = cx - stroke - 2;
-  const circum = 2 * Math.PI * r;
-  const pct = Math.min(ms / (SHIFT_HOURS * 3_600_000), 1);
-  const offset = circum * (1 - pct);
-  const arcColor = pct < 0.5 ? "#10b981" : pct < 0.85 ? "#f59e0b" : "#f43f5e";
+function ProgressRing({ ms, size = 236 }: { ms: number; size?: number }) {
+  const stroke = 8;
+  const cx     = size / 2;
+  const cy     = size / 2;
+  const r      = cx - stroke - 3;
+  const circ   = 2 * Math.PI * r;
+  const pct    = Math.min(ms / (SHIFT_HOURS * 3_600_000), 1);
+  const offset = circ * (1 - pct);
+  const arc    = pct < 0.50 ? "#10b981" : pct < 0.85 ? "#f59e0b" : "#f43f5e";
 
-  // Hour tick marks (one per target shift hour)
   const ticks = Array.from({ length: SHIFT_HOURS }, (_, i) => {
     const frac  = i / SHIFT_HOURS;
     const angle = frac * 2 * Math.PI - Math.PI / 2;
-    const inner = r - 6;
-    const outer = r + 5;
-    const done  = frac <= pct;
+    const ir = r - 7;
+    const or = r + 6;
     return {
-      x1: cx + inner * Math.cos(angle),
-      y1: cy + inner * Math.sin(angle),
-      x2: cx + outer * Math.cos(angle),
-      y2: cy + outer * Math.sin(angle),
-      done,
+      x1: cx + ir * Math.cos(angle), y1: cy + ir * Math.sin(angle),
+      x2: cx + or * Math.cos(angle), y2: cy + or * Math.sin(angle),
+      lit: frac < pct,
     };
   });
 
@@ -370,30 +369,31 @@ function ProgressRing({ ms, size = 232 }: { ms: number; size?: number }) {
     <svg
       width={size} height={size}
       className="absolute inset-0 pointer-events-none"
-      style={{ transform: "rotate(-90deg)" }}
+      style={{ transform: "rotate(-90deg)", willChange: "transform" }}
       aria-hidden
     >
       {/* Track */}
       <circle cx={cx} cy={cy} r={r}
-        fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={stroke} />
-      {/* Progress arc — glowing */}
+        fill="none" stroke="rgba(255,255,255,0.055)" strokeWidth={stroke} />
+      {/* Progress arc with glow */}
       <circle cx={cx} cy={cy} r={r}
-        fill="none" stroke={arcColor} strokeWidth={stroke}
+        fill="none" stroke={arc} strokeWidth={stroke}
         strokeLinecap="round"
-        strokeDasharray={circum} strokeDashoffset={offset}
+        strokeDasharray={circ}
+        strokeDashoffset={offset}
         style={{
-          transition: "stroke-dashoffset 1.4s cubic-bezier(0.4,0,0.2,1), stroke 0.8s ease",
-          filter: pct > 0 ? `drop-shadow(0 0 5px ${arcColor})` : "none",
+          transition: "stroke-dashoffset 1.5s cubic-bezier(0.4,0,0.2,1), stroke 0.8s ease",
+          filter: pct > 0.01 ? `drop-shadow(0 0 6px ${arc})` : "none",
         }}
       />
-      {/* Tick marks */}
+      {/* Hour tick marks */}
       {ticks.map((t, i) => (
         <line key={i}
           x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
-          stroke={t.done ? arcColor : "rgba(255,255,255,0.12)"}
-          strokeWidth={t.done ? 2 : 1.5}
+          stroke={t.lit ? arc : "rgba(255,255,255,0.10)"}
+          strokeWidth={t.lit ? 2.5 : 1.5}
           strokeLinecap="round"
-          style={{ transition: "stroke 0.8s ease" }}
+          style={{ transition: "stroke 0.8s ease, stroke-width 0.4s ease" }}
         />
       ))}
     </svg>
@@ -401,81 +401,106 @@ function ProgressRing({ ms, size = 232 }: { ms: number; size?: number }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: THE BIG BUTTON
+// THE BIG CLOCK BUTTON
+// • Ripple fires from the exact tap/click coordinate
+// • Haptic feedback on every press
+// • Three staggered expanding rings when clocked in
+// • Animated gradient background
+// • will-change: transform for 60fps scale transition
 // ─────────────────────────────────────────────────────────────────────────────
 
+type Ripple = { x: number; y: number; id: number };
+
 type ClockButtonProps = {
-  clockedIn:   boolean;
-  busy:        boolean;
-  workedMs:    number;
-  mood:        Mood;
-  onClick:     () => void;
-  buttonRef:   React.RefObject<HTMLButtonElement | null>;
+  clockedIn:  boolean;
+  busy:       boolean;
+  workedMs:   number;
+  mood:       Mood;
+  onClick:    () => void;
+  btnRef:     React.RefObject<HTMLButtonElement | null>;
 };
 
-function ClockButton({ clockedIn, busy, workedMs, mood, onClick, buttonRef }: ClockButtonProps) {
-  const [pressed, setPressed] = useState(false);
+function ClockButton({ clockedIn, busy, workedMs, mood, onClick, btnRef }: ClockButtonProps) {
+  const [ripples, setRipples] = useState<Ripple[]>([]);
 
-  function handlePress() {
+  /** Add ripple at pointer position + trigger haptic, then call parent onClick */
+  function handlePointerDown(e: React.PointerEvent<HTMLButtonElement>) {
     if (busy) return;
-    setPressed(true);
-    setTimeout(() => setPressed(false), 150);
-    onClick();
+    vibrate(clockedIn ? [12, 60, 18] : [10]);
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const id   = Date.now() + Math.random();
+    setRipples((r) => [...r, { x: e.clientX - rect.left, y: e.clientY - rect.top, id }]);
+    setTimeout(() => setRipples((r) => r.filter((rp) => rp.id !== id)), 750);
   }
 
-  const bgClass = clockedIn
+  const btnGrad = clockedIn
     ? "from-rose-500 via-red-500 to-rose-600"
     : `${mood.from} ${mood.to}`;
-
-  const glowClass = clockedIn ? "animate-glow-red" : "animate-glow-green";
+  const glowCls = clockedIn ? "animate-glow-red" : "animate-glow-green";
 
   const label = busy
-    ? clockedIn ? "Clocking out…" : "Clocking in…"
-    : clockedIn ? "Clock Out"     : "Clock In";
+    ? (clockedIn ? "Clocking out…" : "Clocking in…")
+    : (clockedIn ? "Clock Out"      : "Clock In");
 
   return (
-    <div className="relative" style={{ width: 232, height: 232 }}>
+    <div className="relative" style={{ width: 236, height: 236 }}>
 
-      {/* Radiating pulse rings — only while clocked in and not busy */}
+      {/* ── Radiating rings — only while on shift and idle ── */}
       {clockedIn && !busy && (
         <>
-          <div
-            className={`absolute inset-0 rounded-full border-2 ${mood.ring} animate-ring-1`}
-            style={{ margin: "-14px" }}
-          />
-          <div
-            className={`absolute inset-0 rounded-full border ${mood.ring} animate-ring-2`}
-            style={{ margin: "-14px" }}
-          />
-          <div
-            className={`absolute inset-0 rounded-full border ${mood.ring} animate-ring-3`}
-            style={{ margin: "-14px" }}
-          />
+          {[1,2,3].map((n) => (
+            <div
+              key={n}
+              className={`absolute inset-0 rounded-full animate-ring-${n}`}
+              style={{
+                margin: "-16px",
+                border: `1.5px solid ${mood.ring}`,
+                willChange: "transform, opacity",
+              }}
+            />
+          ))}
         </>
       )}
 
-      {/* SVG progress ring */}
-      <ProgressRing ms={workedMs} size={232} />
+      {/* ── SVG progress ring ── */}
+      <ProgressRing ms={workedMs} size={236} />
 
-      {/* THE BUTTON — fills inner area leaving room for progress ring */}
+      {/* ── THE BUTTON ── */}
       <button
-        ref={buttonRef}
-        onClick={handlePress}
+        ref={btnRef}
+        onPointerDown={handlePointerDown}
+        onClick={busy ? undefined : onClick}
         disabled={busy}
         aria-label={label}
         className={`absolute rounded-full flex flex-col items-center justify-center gap-1
                     select-none overflow-hidden
-                    bg-gradient-to-br ${bgClass}
-                    ${glowClass}
-                    transition-transform duration-100
-                    disabled:opacity-60 disabled:cursor-wait
-                    ${pressed ? "scale-90" : "scale-100"}
-                    active:scale-90`}
-        style={{ inset: "18px" }}
+                    bg-gradient-to-br animate-gradient-drift ${btnGrad} ${glowCls}
+                    transition-transform duration-100 ease-out
+                    active:scale-[0.88]
+                    disabled:opacity-60 disabled:cursor-wait`}
+        style={{
+          inset: "19px",
+          touchAction: "manipulation",
+          WebkitTapHighlightColor: "transparent",
+          willChange: "transform",
+        } as React.CSSProperties}
       >
-        {/* Top gloss */}
-        <div className="absolute top-0 inset-x-0 h-1/2 rounded-full
-                        bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
+        {/* Top-half gloss overlay */}
+        <div
+          className="absolute top-0 inset-x-0 h-1/2 rounded-full pointer-events-none"
+          style={{ background: "linear-gradient(to bottom, rgba(255,255,255,0.22), transparent)" }}
+        />
+
+        {/* Ripples */}
+        {ripples.map((rp) => (
+          <span
+            key={rp.id}
+            className="absolute rounded-full bg-white/30 pointer-events-none animate-ripple"
+            style={{ width: 20, height: 20, left: rp.x - 10, top: rp.y - 10,
+                     willChange: "transform, opacity" }}
+          />
+        ))}
 
         {/* Icon */}
         <div className="relative z-10">
@@ -486,27 +511,25 @@ function ClockButton({ clockedIn, busy, workedMs, mood, onClick, buttonRef }: Cl
               <path strokeLinecap="round" d="M4 9a9 9 0 0114.13-3.36M20 15A9 9 0 015.87 18.36" />
             </svg>
           ) : clockedIn ? (
-            /* Pause / stop bars */
-            <svg className="w-10 h-10 text-white" viewBox="0 0 24 24" fill="currentColor">
+            <svg className="w-11 h-11 text-white" viewBox="0 0 24 24" fill="currentColor">
               <rect x="5"  y="4" width="4" height="16" rx="1.5" />
               <rect x="15" y="4" width="4" height="16" rx="1.5" />
             </svg>
           ) : (
-            /* Play arrow */
-            <svg className="w-11 h-11 text-white" viewBox="0 0 24 24" fill="currentColor">
+            <svg className="w-12 h-12 text-white" viewBox="0 0 24 24" fill="currentColor">
               <path d="M8 5.14v14l11-7-11-7z" />
             </svg>
           )}
         </div>
 
-        {/* Main label */}
-        <span className="relative z-10 text-white font-black text-[17px] tracking-wide leading-none">
+        {/* Primary label */}
+        <span className="relative z-10 text-white font-black text-[18px] tracking-wide leading-none">
           {label}
         </span>
 
-        {/* Sub-label: hours worked if on shift */}
+        {/* Sub-label: shift duration if clocked in */}
         {clockedIn && !busy && workedMs > 60_000 && (
-          <span className="relative z-10 text-white/60 text-xs font-medium">
+          <span className="relative z-10 text-white/55 text-xs font-semibold">
             {formatDuration(workedMs)}
           </span>
         )}
@@ -516,33 +539,34 @@ function ClockButton({ clockedIn, busy, workedMs, mood, onClick, buttonRef }: Cl
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Full-screen success overlay
-// Auto-dismisses after ~1.8 s (matches the CSS animation duration)
+// FULL-SCREEN SUCCESS OVERLAY
+// Covers the screen for 1.9 s then auto-dismisses.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type SuccessKind = "clockin" | "clockout";
 
 function SuccessOverlay({ kind, onDone }: { kind: SuccessKind; onDone: () => void }) {
   useEffect(() => {
-    const t = setTimeout(onDone, 1850);
+    const t = setTimeout(onDone, 1950);
     return () => clearTimeout(t);
   }, [onDone]);
 
   const isIn = kind === "clockin";
+
   return (
     <div
       className={`fixed inset-0 z-50 flex flex-col items-center justify-center
-                  bg-gradient-to-b pointer-events-none
-                  ${isIn ? "from-emerald-950 to-slate-950" : "from-violet-950 to-slate-950"}
-                  animate-success`}
+                  pointer-events-none select-none animate-success
+                  bg-gradient-to-b ${isIn ? "from-emerald-950 to-slate-950" : "from-violet-950 to-slate-950"}`}
+      style={{ willChange: "opacity" }}
     >
-      <span className="text-8xl animate-emoji block mb-4">
+      <span className="block text-[96px] animate-emoji" style={{ willChange: "transform" }}>
         {isIn ? "🎉" : "👋"}
       </span>
-      <p className="text-white text-2xl font-black tracking-tight">
+      <p className="text-white text-[26px] font-black tracking-tight mt-2">
         {isIn ? "You're on the clock!" : "See you next time!"}
       </p>
-      <p className="text-white/50 text-sm mt-2">
+      <p className="text-white/45 text-sm mt-2">
         {isIn ? "Go make today epic ⚡" : "Rest up — you've earned it 💤"}
       </p>
     </div>
@@ -550,7 +574,8 @@ function SuccessOverlay({ kind, onDone }: { kind: SuccessKind; onDone: () => voi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Achievement toast (drops from top)
+// ACHIEVEMENT TOAST
+// Drops from the top edge. Shimmer sweep + countdown bar.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AchievementToast({ badge, onDone }: { badge: Badge; onDone: () => void }) {
@@ -558,7 +583,7 @@ function AchievementToast({ badge, onDone }: { badge: Badge; onDone: () => void 
 
   useEffect(() => {
     const t1 = setTimeout(() => setLeaving(true), 3000);
-    const t2 = setTimeout(onDone, 3400);
+    const t2 = setTimeout(onDone, 3450);
     return () => { clearTimeout(t1); clearTimeout(t2); };
   }, [onDone]);
 
@@ -566,63 +591,78 @@ function AchievementToast({ badge, onDone }: { badge: Badge; onDone: () => void 
     <div
       className={`fixed left-0 right-0 z-50 flex justify-center
                   ${leaving ? "animate-toast-out" : "animate-toast-in"}`}
-      style={{ top: 16 }}
+      style={{ top: 12, willChange: "transform, opacity" }}
     >
-      <div className="relative w-80 bg-slate-800/95 backdrop-blur-xl border border-white/10
-                      rounded-2xl px-4 py-3 shadow-2xl flex items-center gap-3 overflow-hidden">
+      <div className="relative w-80 rounded-2xl overflow-hidden
+                      bg-slate-800/96 backdrop-blur-xl border border-white/10
+                      shadow-2xl px-4 py-3 flex items-center gap-3">
         {/* Shimmer */}
         <div className="absolute inset-0 animate-shimmer pointer-events-none" />
         <span className="text-2xl relative z-10">{badge.emoji}</span>
-        <div className="relative z-10">
-          <p className="text-violet-300 text-[10px] font-bold uppercase tracking-widest">
+        <div className="relative z-10 min-w-0">
+          <p className="text-violet-300 text-[10px] font-black uppercase tracking-widest">
             Badge Unlocked
           </p>
-          <p className="text-white font-bold text-sm leading-tight">{badge.label}</p>
-          <p className="text-slate-400 text-xs">{badge.desc}</p>
+          <p className="text-white font-black text-sm leading-tight">{badge.label}</p>
+          <p className="text-slate-400 text-xs truncate">{badge.desc}</p>
         </div>
-        {/* Timer bar */}
-        <div className="absolute bottom-0 left-0 h-0.5 bg-violet-500 rounded-full w-full"
-             style={{ animation: "bar-fill 3.1s linear both reverse", animationDirection: "reverse",
-                      animationFillMode: "both" }} />
+        {/* Countdown drain bar */}
+        <div
+          className="absolute bottom-0 left-0 h-[3px] rounded-full"
+          style={{
+            background: "linear-gradient(90deg, #8b5cf6, #a78bfa)",
+            animation: "bar-fill 3.1s linear both reverse",
+          }}
+        />
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Clock-out shift summary card (slides up)
+// CLOCK-OUT SUMMARY CARD
+// Slides up from the bottom. Shows hours, XP, earnings, badge, and XP bar.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ShiftSummaryCard({
   ms, mood, name, onClose,
-}: {
-  ms: number; mood: Mood; name: string; onClose: () => void;
-}) {
-  const hours       = ms / 3_600_000;
-  const badge       = pickRandom(BADGES);
-  const quip        = pickRandom(CLOCKOUT_QUIPS);
-  const earnings    = (hours * HOURLY_RATE).toFixed(2);
-  const xpEarned    = Math.round(XP_PER_SHIFT + hours * 7);
-  const firstName   = name.split(" ")[0] ?? name;
+}: { ms: number; mood: Mood; name: string; onClose: () => void }) {
+  const hours     = ms / 3_600_000;
+  const badge     = pickRandom(BADGES);
+  const quip      = pickRandom(CLOCKOUT_QUIPS);
+  const earnings  = (hours * HOURLY_RATE).toFixed(2);
+  const xpEarned  = Math.round(XP_PER_SHIFT + hours * 7);
+  const firstName = name.split(" ")[0] ?? name;
+  const newXP     = Math.min(MOCK_XP + xpEarned, MOCK_XP_MAX);
+
+  // Prevent background scroll while card is open
+  useEffect(() => {
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = ""; };
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center">
-      {/* Tap-outside to close */}
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-
+      <div
+        className="absolute inset-0 bg-black/72 backdrop-blur-sm"
+        onClick={onClose}
+      />
       <div
         className="relative w-full max-w-sm rounded-t-3xl overflow-hidden
                    bg-slate-900 border-t border-x border-white/10 shadow-2xl
                    animate-slide-up"
+        style={{ willChange: "transform" }}
       >
-        {/* Mood-coloured gradient accent */}
-        <div className={`absolute -top-32 -right-20 w-64 h-64 rounded-full blur-3xl opacity-25
-                         bg-gradient-to-br ${mood.from} ${mood.to}`} />
+        {/* Mood-tinted glow blob */}
+        <div
+          className={`absolute -top-36 -right-24 w-72 h-72 rounded-full blur-3xl opacity-[0.22]
+                      bg-gradient-to-br ${mood.from} ${mood.to} pointer-events-none`}
+        />
 
         <div className="relative px-6 pt-8 pb-10">
           {/* Header */}
           <div className="text-center mb-7">
-            <div className="text-6xl mb-3">🎉</div>
+            <div className="text-6xl leading-none mb-3">🎉</div>
             <h2 className="text-2xl font-black text-white tracking-tight">
               Shift complete!
             </h2>
@@ -631,50 +671,52 @@ function ShiftSummaryCard({
             </p>
           </div>
 
-          {/* Stats */}
+          {/* Stat grid */}
           <div className="grid grid-cols-2 gap-3 mb-4">
-            <SummaryTile label="Hours worked"  value={formatDuration(ms)}   colour="text-white" />
-            <SummaryTile label="XP earned"     value={`+${xpEarned}`}       colour="text-violet-400" />
+            <StatTile label="Hours worked"  val={formatDuration(ms)}  colour="text-white" />
+            <StatTile label="XP earned"     val={`+${xpEarned}`}      colour="text-violet-400" />
             <div className="col-span-2">
-              <SummaryTile
+              <StatTile
                 label="Est. earnings"
-                value={`R ${earnings}`}
+                val={`R ${earnings}`}
                 colour="text-emerald-400"
                 note="Ask your manager for the exact figure"
               />
             </div>
           </div>
 
-          {/* Badge unlocked */}
+          {/* Badge */}
           <div className="relative bg-violet-500/10 border border-violet-500/20
-                          rounded-2xl px-4 py-3 flex items-center gap-3 mb-6 overflow-hidden">
+                          rounded-2xl px-4 py-3 flex items-center gap-3 mb-5 overflow-hidden">
             <div className="absolute inset-0 animate-shimmer pointer-events-none" />
             <span className="text-3xl relative z-10">{badge.emoji}</span>
             <div className="relative z-10">
-              <p className="text-violet-300 text-[10px] font-bold uppercase tracking-widest">
+              <p className="text-violet-300 text-[10px] font-black uppercase tracking-widest">
                 Badge Unlocked
               </p>
-              <p className="text-white font-bold text-sm">{badge.label}</p>
+              <p className="text-white font-black text-sm leading-tight">{badge.label}</p>
               <p className="text-slate-400 text-xs">{badge.desc}</p>
             </div>
           </div>
 
-          {/* XP gained animation */}
-          <div className="bg-white/5 rounded-xl px-4 py-2 flex items-center gap-3 mb-5">
-            <span className="text-violet-400 text-sm font-bold">Lv.{MOCK_LEVEL}</span>
+          {/* XP bar with new total */}
+          <div className="flex items-center gap-3 bg-white/4 rounded-xl px-4 py-2.5 mb-6">
+            <span className="text-violet-400 text-xs font-black shrink-0">Lv.{MOCK_LEVEL}</span>
             <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-violet-500 to-purple-400 rounded-full animate-bar-fill"
-                style={{ width: `${Math.min(((MOCK_XP + xpEarned) / MOCK_XP_MAX) * 100, 100)}%` }}
+                className="h-full rounded-full animate-bar-fill
+                           bg-gradient-to-r from-violet-500 to-fuchsia-400"
+                style={{ width: `${(newXP / MOCK_XP_MAX) * 100}%` }}
               />
             </div>
-            <span className="text-slate-500 text-xs">{MOCK_XP + xpEarned}/{MOCK_XP_MAX}</span>
+            <span className="text-slate-500 text-xs shrink-0">{newXP}/{MOCK_XP_MAX}</span>
           </div>
 
+          {/* CTA */}
           <button
             onClick={onClose}
-            className={`w-full py-4 rounded-2xl font-black text-white text-base
-                        bg-gradient-to-r ${mood.from} ${mood.to}
+            className={`w-full py-4 rounded-2xl font-black text-white text-[17px]
+                        bg-gradient-to-r ${mood.from} ${mood.to} animate-gradient-drift
                         active:scale-95 transition-transform duration-100 shadow-lg`}
           >
             Nice work! 💪
@@ -685,79 +727,100 @@ function ShiftSummaryCard({
   );
 }
 
-function SummaryTile({
-  label, value, colour, note,
-}: { label: string; value: string; colour: string; note?: string }) {
+function StatTile({
+  label, val, colour, note,
+}: { label: string; val: string; colour: string; note?: string }) {
   return (
-    <div className="bg-white/5 border border-white/5 rounded-2xl p-4 text-center">
-      <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mb-1">
-        {label}
-      </p>
-      <p className={`text-2xl font-black ${colour}`}>{value}</p>
+    <div className="bg-white/[0.04] border border-white/[0.05] rounded-2xl p-4 text-center">
+      <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">{label}</p>
+      <p className={`text-2xl font-black ${colour}`}>{val}</p>
       {note && <p className="text-slate-600 text-[10px] mt-0.5">{note}</p>}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: XP progress bar
+// XP PROGRESS BAR
 // ─────────────────────────────────────────────────────────────────────────────
 
 function XPBar({ level, xp, max }: { level: number; xp: number; max: number }) {
-  const pct = `${Math.min((xp / max) * 100, 100).toFixed(1)}%`;
   return (
     <div className="flex items-center gap-3">
-      <span className="text-[11px] font-black text-violet-400 shrink-0">Lv.{level}</span>
-      <div className="flex-1 h-1.5 bg-white/8 rounded-full overflow-hidden">
+      <span className="text-[11px] font-black text-violet-400 shrink-0 w-8">Lv.{level}</span>
+      <div className="flex-1 h-1.5 bg-white/[0.07] rounded-full overflow-hidden">
         <div
           className="h-full rounded-full animate-bar-fill
                      bg-gradient-to-r from-violet-500 via-purple-400 to-fuchsia-400"
-          style={{ width: pct }}
+          style={{ width: `${(xp / max) * 100}%`, willChange: "width" }}
         />
       </div>
-      <span className="text-[11px] text-slate-600 shrink-0">{xp}/{max} XP</span>
+      <span className="text-[11px] text-slate-600 shrink-0 tabular-nums">{xp}/{max}</span>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENT: Rotating motivational message
+// ROTATING MOTIVATIONAL MESSAGE
+// Rotates every 9 s. Changes immediately when clocked-in state changes.
+// Also updates AI comment when a worked-hours milestone is crossed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function MotivMessage({ clockedIn, workedMs }: { clockedIn: boolean; workedMs: number }) {
-  const [key, setKey]   = useState(0);
-  const [text, setText] = useState(() =>
-    clockedIn ? getShiftComment(workedMs) : pickRandom(PRECLOCK_MESSAGES)
-  );
+  const [msgKey,  setMsgKey]  = useState(0);
+  const [text,    setText]    = useState<string>("");
+  const lastComment           = useRef<string>("");
 
-  // Rotate every 9 s; also refresh immediately when clockedIn changes
+  // Initial text + rotation
   useEffect(() => {
-    setText(clockedIn ? getShiftComment(workedMs) : pickRandom(PRECLOCK_MESSAGES));
-    setKey((k) => k + 1);
+    const next = clockedIn ? getShiftComment(workedMs) : pickRandom(PRECLOCK);
+    setText(next);
+    lastComment.current = next;
+    setMsgKey((k) => k + 1);
+
     const id = setInterval(() => {
-      setText(clockedIn ? getShiftComment(workedMs) : pickRandom(PRECLOCK_MESSAGES));
-      setKey((k) => k + 1);
+      const t = clockedIn ? getShiftComment(workedMs) : pickRandom(PRECLOCK);
+      setText(t);
+      setMsgKey((k) => k + 1);
     }, 9_000);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clockedIn]);
 
-  // Update comment when hours milestone crossed (without resetting rotation timer)
+  // Refresh AI comment when milestone crossed
   useEffect(() => {
-    if (clockedIn) {
-      const next = getShiftComment(workedMs);
-      if (next !== text) {
-        setText(next);
-        setKey((k) => k + 1);
-      }
+    if (!clockedIn) return;
+    const next = getShiftComment(workedMs);
+    if (next !== lastComment.current) {
+      lastComment.current = next;
+      setText(next);
+      setMsgKey((k) => k + 1);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workedMs, clockedIn]);
+  }, [workedMs]);
 
   return (
-    <p key={key} className="text-slate-400 text-sm text-center animate-fade-up px-4">
+    <p key={msgKey} className="text-slate-400 text-sm text-center animate-fade-up px-6 min-h-[20px]">
       {text}
     </p>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMALL REUSABLE CHIP
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Chip({
+  icon, text, color,
+}: { icon: string; text: string; color: "amber" | "violet" | "emerald" }) {
+  const cls = {
+    amber:   "bg-amber-500/10  border-amber-500/20  text-amber-400",
+    violet:  "bg-violet-500/10 border-violet-500/20 text-violet-400",
+    emerald: "bg-emerald-500/10 border-emerald-500/20 text-emerald-400",
+  }[color];
+  return (
+    <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-black ${cls}`}>
+      {icon} {text}
+    </div>
   );
 }
 
@@ -768,7 +831,7 @@ function MotivMessage({ clockedIn, workedMs }: { clockedIn: boolean; workedMs: n
 export default function ClockPage({ params }: { params: Promise<{ staffId: string }> }) {
   const { staffId } = use(params);
 
-  // ── Core state (identical to original) ───────────────────────────────────
+  // ── Core state — unchanged from original ─────────────────────────────────
   const [staff,             setStaff]             = useState<StaffMember | null>(null);
   const [openSession,       setOpenSession]       = useState<OpenSession | null>(null);
   const [reminderSettings,  setReminderSettings]  = useState<ReminderSettings | null>(null);
@@ -783,25 +846,26 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
   const reminderIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Gamification state ────────────────────────────────────────────────────
-  const mood             = getMood();
-  const [now,        setNow]        = useState(new Date());
-  const [workedMs,   setWorkedMs]   = useState(0);
-  const [success,    setSuccess]    = useState<SuccessKind | null>(null);
-  const [showSummary,setShowSummary]= useState(false);
-  const [summaryMs,  setSummaryMs]  = useState(0);
-  const [badge,      setBadge]      = useState<Badge | null>(null);
+  const mood           = getMood();
+  const [now,          setNow]          = useState(new Date());
+  const [workedMs,     setWorkedMs]     = useState(0);
+  const [success,      setSuccess]      = useState<SuccessKind | null>(null);
+  const [showSummary,  setShowSummary]  = useState(false);
+  const [summaryMs,    setSummaryMs]    = useState(0);
+  const [badge,        setBadge]        = useState<Badge | null>(null);
 
-  const confettiBurstRef  = useRef<BurstFn | null>(null);
-  const buttonRef         = useRef<HTMLButtonElement>(null);
+  const confettiBurstRef = useRef<BurstFn | null>(null);
+  const btnRef           = useRef<HTMLButtonElement>(null);
 
-  // ── Live clock ticker (every second for HH:MM display) ───────────────────
+  // ── Live clock (seconds) ─────────────────────────────────────────────────
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1_000);
     return () => clearInterval(id);
   }, []);
 
-  // ── Worked-ms ticker (every 30 s to avoid excessive re-renders) ───────────
+  // ── Worked-ms ticker (30 s refresh) ──────────────────────────────────────
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!openSession?.clock_in_time) { setWorkedMs(0); return; }
     const update = () =>
       setWorkedMs(Date.now() - new Date(openSession.clock_in_time).getTime());
@@ -810,7 +874,14 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
     return () => clearInterval(id);
   }, [openSession]);
 
-  // ─── Load data (unchanged) ────────────────────────────────────────────────
+  // ── Prevent body scroll when overlays are open ───────────────────────────
+  useEffect(() => {
+    if (success !== null) document.body.style.overflow = "hidden";
+    else                  document.body.style.overflow = "";
+    return () => { document.body.style.overflow = ""; };
+  }, [success]);
+
+  // ─── loadData (unchanged) ─────────────────────────────────────────────────
   async function loadData() {
     setIsLoading(true);
     setMessage("");
@@ -818,12 +889,10 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
     const [staffRes, settingsRes] = await Promise.all([
       supabase.from("staff")
         .select("id, first_name, last_name, role, branch")
-        .eq("id", staffId)
-        .single(),
+        .eq("id", staffId).single(),
       supabase.from("payroll_settings")
         .select("reminder_enabled, reminder_time")
-        .limit(1)
-        .maybeSingle(),
+        .limit(1).maybeSingle(),
     ]);
 
     if (staffRes.error || !staffRes.data) {
@@ -832,7 +901,6 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
       setIsLoading(false);
       return;
     }
-
     setStaff(staffRes.data as StaffMember);
 
     const raw = settingsRes.data;
@@ -851,8 +919,7 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
       .eq("staff_id", staffId)
       .is("clock_out_time", null)
       .order("clock_in_time", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .limit(1).maybeSingle();
 
     setOpenSession(sessionData as OpenSession | null);
     setIsLoading(false);
@@ -860,15 +927,13 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
 
   useEffect(() => {
     if (!staffId?.trim()) {
-      setMessage("Invalid staff link.");
-      setIsError(true);
-      setIsLoading(false);
-      return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setMessage("Invalid staff link."); setIsError(true); setIsLoading(false); return;
     }
     loadData();
   }, [staffId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Reminder modal interval (unchanged) ──────────────────────────────────
+  // ─── Reminder interval (unchanged) ───────────────────────────────────────
   useEffect(() => {
     function check() {
       setShowModal(
@@ -880,7 +945,7 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
     return () => { if (reminderIntervalRef.current) clearInterval(reminderIntervalRef.current); };
   }, [reminderSettings, openSession, locallyDismissed]);
 
-  // ─── Clock In (logic unchanged; gamification added after success) ─────────
+  // ─── Clock In (logic unchanged + gamification) ───────────────────────────
   async function handleClockIn() {
     if (!staff) return;
     setIsWorking(true);
@@ -903,31 +968,26 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
     }]);
 
     if (error) {
-      setMessage("Could not clock in. Please try again.");
-      setIsError(true);
+      setMessage("Could not clock in. Please try again."); setIsError(true);
     } else {
       setIsError(false);
       setLocallyDismissed(false);
-      // 🎉 Fire confetti from button position
-      const rect = buttonRef.current?.getBoundingClientRect();
+      // Fire confetti from button center
+      const rect = btnRef.current?.getBoundingClientRect();
       const ox = rect ? rect.left + rect.width  / 2 : window.innerWidth  / 2;
-      const oy = rect ? rect.top  + rect.height / 2 : window.innerHeight * 0.45;
-      setTimeout(() => confettiBurstRef.current?.(ox, oy), 100);
-      // Show success overlay
+      const oy = rect ? rect.top  + rect.height / 2 : window.innerHeight * 0.44;
+      setTimeout(() => confettiBurstRef.current?.(ox, oy), 80);
       setSuccess("clockin");
-      // Show badge after overlay fades
-      setTimeout(() => setBadge(pickRandom(BADGES)), 2000);
+      setTimeout(() => setBadge(pickRandom(BADGES)), 2100);
       await loadData();
     }
     setIsWorking(false);
   }
 
-  // ─── Core clock-out (unchanged) ───────────────────────────────────────────
+  // ─── Core clock-out (unchanged) ──────────────────────────────────────────
   async function performClockOut(reminderResponse?: "clocked_out"): Promise<boolean> {
     if (!openSession) {
-      setMessage("You are not currently clocked in.");
-      setIsError(true);
-      return false;
+      setMessage("You are not currently clocked in."); setIsError(true); return false;
     }
     setIsGettingLocation(true);
     const loc = await getLocation();
@@ -947,19 +1007,13 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
       payload.clock_out_reminder_response        = reminderResponse;
       payload.clock_out_reminder_acknowledged_at = new Date().toISOString();
     }
-
     const { error } = await supabase.from("clock_sessions")
       .update(payload).eq("id", openSession.id);
-
-    if (error) {
-      setMessage("Could not clock out. Please try again.");
-      setIsError(true);
-      return false;
-    }
+    if (error) { setMessage("Could not clock out. Please try again."); setIsError(true); return false; }
     return true;
   }
 
-  // ─── Clock Out (logic unchanged; summary card added on success) ───────────
+  // ─── Clock Out (logic unchanged + summary card) ───────────────────────────
   async function handleClockOut() {
     setIsWorking(true);
     setMessage("");
@@ -971,25 +1025,24 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
       setSummaryMs(captured);
       setSuccess("clockout");
       await loadData();
-      setTimeout(() => setShowSummary(true), 1900);
+      setTimeout(() => setShowSummary(true), 2000);
     }
     setIsWorking(false);
   }
 
-  // ─── Reminder: Still Working (unchanged) ──────────────────────────────────
+  // ─── Reminder: Still Working (unchanged) ─────────────────────────────────
   async function handleStillWorking() {
     if (!openSession) return;
     setIsRespondingToReminder(true);
-    const now = new Date().toISOString();
+    const ts = new Date().toISOString();
     await supabase.from("clock_sessions").update({
       clock_out_reminder_response:        "still_working",
-      clock_out_reminder_acknowledged_at: now,
-      clock_out_reminder_sent_at:         openSession.clock_out_reminder_sent_at ?? now,
+      clock_out_reminder_acknowledged_at: ts,
+      clock_out_reminder_sent_at:         openSession.clock_out_reminder_sent_at ?? ts,
     }).eq("id", openSession.id);
-    setOpenSession((p) => p
-      ? { ...p, clock_out_reminder_response: "still_working",
-          clock_out_reminder_acknowledged_at: now }
-      : p);
+    setOpenSession((p) =>
+      p ? { ...p, clock_out_reminder_response: "still_working",
+            clock_out_reminder_acknowledged_at: ts } : p);
     setLocallyDismissed(true);
     setShowModal(false);
     setIsRespondingToReminder(false);
@@ -1011,35 +1064,36 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
     setIsRespondingToReminder(false);
   }
 
-  // ─── Derived ──────────────────────────────────────────────────────────────
-  const isBusy     = isWorking || isGettingLocation;
-  const clockedIn  = !!openSession;
-  const staffName  = staff ? `${staff.first_name} ${staff.last_name}` : "";
-  const initials   = staff
+  // ─── Derived ─────────────────────────────────────────────────────────────
+  const isBusy    = isWorking || isGettingLocation;
+  const clockedIn = !!openSession;
+  const staffName = staff ? `${staff.first_name} ${staff.last_name}` : "";
+  const initials  = staff
     ? `${staff.first_name[0] ?? ""}${staff.last_name[0] ?? ""}`.toUpperCase()
     : "?";
   const minutesLate = reminderSettings?.reminder_time
     ? minutesLateForReminder(reminderSettings.reminder_time)
     : 0;
 
-  // HH:MM with blinking colon
-  const hh  = String(now.getHours()).padStart(2, "0");
-  const mm  = String(now.getMinutes()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
 
-  // ─── RENDER ───────────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════════════════════════════════════
   return (
-    <div className="min-h-screen bg-slate-950 text-white relative overflow-x-hidden">
-
-      {/* Ambient orbs */}
+    <div
+      className="min-h-screen bg-slate-950 text-white relative overflow-x-hidden"
+      style={{ userSelect: "none" } as React.CSSProperties}
+    >
+      {/* ── Ambient background ── */}
       <FloatingOrbs mood={mood} />
 
-      {/* Confetti canvas */}
+      {/* ── Canvas confetti ── */}
       <ConfettiCanvas burstRef={confettiBurstRef} />
 
-      {/* ── Success overlay (clock-in or clock-out) ── */}
-      {success && (
-        <SuccessOverlay kind={success} onDone={() => setSuccess(null)} />
-      )}
+      {/* ── Success flash overlay ── */}
+      {success && <SuccessOverlay kind={success} onDone={() => setSuccess(null)} />}
 
       {/* ── Achievement toast ── */}
       {badge && <AchievementToast badge={badge} onDone={() => setBadge(null)} />}
@@ -1054,63 +1108,60 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
         />
       )}
 
-      {/* ══════════════════════════════════ MAIN CONTENT ══════════════════════════════════ */}
-      <main className="relative flex flex-col items-center max-w-sm mx-auto px-5 min-h-screen">
+      {/* ══════════════════════ MAIN CONTENT ══════════════════════ */}
+      <main className="relative flex flex-col items-center max-w-sm mx-auto px-5 min-h-screen pb-12">
 
         {/* ── HEADER ── */}
-        <header className="w-full flex items-center justify-between pt-12 pb-5">
-          {/* Avatar + name */}
+        <header className="w-full flex items-center justify-between pt-12 pb-5
+                           animate-fade-up stagger-1">
           <div className="flex items-center gap-3">
+            {/* Avatar with animated ring when on shift */}
             <div className="relative">
-              {/* Pulsing ring when on shift */}
-              {clockedIn && (
-                <div className={`absolute -inset-1 rounded-full border-2 ${mood.ring}
-                                 animate-ring-1`} />
-              )}
               <div
-                className={`relative w-12 h-12 rounded-full flex items-center justify-center
+                className={`w-12 h-12 rounded-full flex items-center justify-center
                              font-black text-sm text-white shadow-lg
-                             bg-gradient-to-br ${mood.from} ${mood.to}`}
+                             bg-gradient-to-br ${mood.from} ${mood.to}
+                             ${clockedIn ? "animate-avatar-ring" : ""}`}
+                style={{ willChange: clockedIn ? "box-shadow" : "auto" }}
               >
                 {isLoading ? "…" : initials}
               </div>
             </div>
-            <div>
-              {!isLoading && staff ? (
-                <>
-                  <p className="font-bold text-white text-sm leading-tight">{staff.first_name}</p>
-                  <p className="text-slate-500 text-xs">
-                    {[staff.role, staff.branch].filter(Boolean).join(" · ")}
-                  </p>
-                </>
-              ) : (
-                <div className="space-y-1.5">
-                  <div className="h-3.5 w-20 bg-white/8 rounded animate-pulse" />
-                  <div className="h-3 w-16 bg-white/5 rounded animate-pulse" />
-                </div>
-              )}
-            </div>
+            {/* Name */}
+            {!isLoading && staff ? (
+              <div>
+                <p className="font-black text-white text-sm leading-tight">{staff.first_name}</p>
+                <p className="text-slate-500 text-xs">
+                  {[staff.role, staff.branch].filter(Boolean).join(" · ")}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5 animate-pulse">
+                <div className="h-3.5 w-20 bg-white/8 rounded" />
+                <div className="h-3 w-14 bg-white/5 rounded" />
+              </div>
+            )}
           </div>
-
           {/* Mood badge */}
           <div
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black
                          text-white shadow-md bg-gradient-to-r ${mood.from} ${mood.to}`}
           >
-            <span>{mood.emoji}</span>
-            <span className="hidden sm:inline">{mood.label}</span>
+            {mood.emoji}
+            <span className="hidden xs:inline">{mood.label}</span>
           </div>
         </header>
 
-        {/* ── STRIP: streak + level + status ── */}
+        {/* ── STREAK / LEVEL STRIP ── */}
         {!isLoading && staff && (
-          <div className="w-full flex flex-wrap items-center gap-2 mb-3">
+          <div className="w-full flex flex-wrap items-center gap-2 mb-3
+                          animate-fade-up stagger-2">
             <Chip icon="🔥" text={`${MOCK_STREAK}-day streak`} color="amber" />
-            <Chip icon="⚡" text={`Level ${MOCK_LEVEL}`}         color="violet" />
+            <Chip icon="⚡" text={`Level ${MOCK_LEVEL}`}        color="violet" />
             {clockedIn && (
               <div className="ml-auto flex items-center gap-1.5 px-3 py-1 rounded-full
-                              bg-emerald-500/10 border border-emerald-500/20 text-xs
-                              font-bold text-emerald-400">
+                              bg-emerald-500/10 border border-emerald-500/20
+                              text-xs font-black text-emerald-400">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 On shift
               </div>
@@ -1118,27 +1169,26 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
           </div>
         )}
 
-        {/* ── Mood greeting ── */}
+        {/* ── MOOD GREETING ── */}
         {!isLoading && staff && (
-          <p className="w-full text-slate-500 text-xs mb-6">
+          <p className="w-full text-slate-500 text-xs mb-6 animate-fade-up stagger-2">
             {mood.emoji} {mood.greeting}
           </p>
         )}
 
-        {/* ── LOADING skeleton ── */}
+        {/* ── LOADING SKELETON ── */}
         {isLoading && (
-          <div className="flex flex-col items-center gap-4 py-16 w-full animate-pulse">
-            <div className="w-56 h-56 rounded-full bg-white/5" />
-            <div className="h-10 w-10 bg-white/8 rounded-full" />
-            <div className="h-4 w-48 bg-white/8 rounded" />
-            <div className="h-3 w-32 bg-white/5 rounded" />
+          <div className="flex flex-col items-center gap-5 py-16 w-full animate-pulse">
+            <div className="w-60 h-60 rounded-full bg-white/5" />
+            <div className="h-4 w-52 bg-white/8 rounded" />
+            <div className="h-3 w-36 bg-white/5 rounded" />
           </div>
         )}
 
-        {/* ── Not found ── */}
+        {/* ── NOT FOUND ── */}
         {!isLoading && !staff && (
-          <div className="mt-10 bg-red-950/50 border border-red-800/30 rounded-2xl
-                          px-5 py-8 text-center w-full animate-scale-in">
+          <div className="mt-10 w-full bg-red-950/50 border border-red-800/30
+                          rounded-2xl px-5 py-8 text-center animate-scale-in">
             <p className="text-5xl mb-3">😕</p>
             <p className="text-red-400 font-bold">{message}</p>
             <p className="text-red-700/70 text-sm mt-1">
@@ -1147,88 +1197,87 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
           </div>
         )}
 
-        {/* ══════════════════ CLOCK BUTTON SECTION ══════════════════ */}
+        {/* ══════════ CLOCK SECTION ══════════ */}
         {!isLoading && staff && (
           <>
-            {/* Live clock display */}
-            <div className="flex items-center justify-center mb-2">
-              <span className="text-4xl font-black text-white tracking-widest tabular-nums">
-                {hh}
-                <span className="animate-tick">:</span>
-                {mm}
+            {/* Live HH:MM with blinking colon */}
+            <div className="mb-1 animate-fade-up stagger-3">
+              <span className="text-4xl font-black tracking-widest tabular-nums text-white">
+                {hh}<span className="animate-blink">:</span>{mm}
               </span>
             </div>
 
             {/* Status line */}
-            <p className="text-slate-500 text-xs mb-6 text-center">
+            <p className="text-slate-500 text-xs mb-7 text-center animate-fade-up stagger-3">
               {clockedIn
                 ? `Clocked in at ${formatHHMM(new Date(openSession!.clock_in_time))}`
                 : "Ready to start your shift"}
             </p>
 
-            {/* The button + ring */}
-            <div className="flex justify-center mb-5">
+            {/* THE BUTTON */}
+            <div className="flex justify-center mb-6 animate-fade-up stagger-4">
               <ClockButton
                 clockedIn={clockedIn}
                 busy={isBusy}
                 workedMs={workedMs}
                 mood={mood}
                 onClick={clockedIn ? handleClockOut : handleClockIn}
-                buttonRef={buttonRef}
+                btnRef={btnRef}
               />
             </div>
 
-            {/* Shift AI comment */}
-            <div className="mb-6 min-h-[20px]">
+            {/* AI shift comment */}
+            <div className="mb-6 animate-fade-up stagger-4">
               <MotivMessage clockedIn={clockedIn} workedMs={workedMs} />
             </div>
 
-            {/* Error/info message */}
+            {/* Error / info feedback */}
             {message && !isGettingLocation && (
               <div
-                className={`w-full text-sm font-semibold text-center rounded-2xl px-4 py-3 mb-5
+                className={`w-full text-sm font-bold text-center rounded-2xl px-4 py-3 mb-5
                              animate-scale-in
                              ${isError
                                ? "bg-red-950/60 border border-red-800/30 text-red-400"
-                               : "bg-emerald-950/60 border border-emerald-800/30 text-emerald-400"}`}
+                               : "bg-emerald-950/60 border border-emerald-800/30 text-emerald-400"
+                             }`}
               >
                 {message}
               </div>
             )}
 
             {/* XP bar */}
-            <div className="w-full mb-6">
+            <div className="w-full mb-5 animate-fade-up stagger-5">
               <XPBar level={MOCK_LEVEL} xp={MOCK_XP} max={MOCK_XP_MAX} />
             </div>
 
-            {/* Progress ring info */}
+            {/* Shift progress card — only while on shift */}
             {clockedIn && workedMs > 0 && (
               <div className="w-full flex items-center justify-between mb-5
-                              bg-white/3 border border-white/6 rounded-2xl px-4 py-3
-                              animate-scale-in">
+                              bg-white/[0.03] border border-white/[0.06] rounded-2xl
+                              px-4 py-3.5 animate-scale-in">
                 <div>
-                  <p className="text-slate-500 text-[10px] uppercase tracking-widest font-bold">
+                  <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest">
                     Shift progress
                   </p>
                   <p className="text-white font-black text-lg leading-tight">
                     {formatDuration(workedMs)}
-                    <span className="text-slate-500 text-sm font-medium"> / {SHIFT_HOURS}h</span>
+                    <span className="text-slate-500 text-sm font-semibold"> / {SHIFT_HOURS}h</span>
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-slate-500 text-[10px] uppercase tracking-widest font-bold">
+                  <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest">
                     Est. so far
                   </p>
                   <p className="text-emerald-400 font-black text-lg leading-tight">
-                    R {((workedMs / 3_600_000) * HOURLY_RATE).toFixed(0)}
+                    R {Math.round((workedMs / 3_600_000) * HOURLY_RATE)}
                   </p>
                 </div>
               </div>
             )}
 
             {/* Badges row */}
-            <div className="w-full mb-6">
-              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2">
+            <div className="w-full mb-5 animate-fade-up stagger-5">
+              <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">
                 Your Badges
               </p>
               <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-hide">
@@ -1237,30 +1286,31 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
                     key={b.id}
                     title={b.desc}
                     className="flex-none flex items-center gap-1.5 px-3 py-1.5 rounded-full
-                               bg-white/5 border border-white/8 text-xs text-slate-400
-                               whitespace-nowrap hover:bg-white/10 transition-colors cursor-default"
+                               bg-white/[0.04] border border-white/[0.07] text-xs
+                               text-slate-400 whitespace-nowrap
+                               hover:bg-white/10 transition-colors duration-150 cursor-default"
                   >
-                    <span>{b.emoji}</span>
-                    <span className="font-medium text-slate-300">{b.label}</span>
+                    {b.emoji}
+                    <span className="font-bold text-slate-300">{b.label}</span>
                   </div>
                 ))}
               </div>
             </div>
 
             {/* Team widget */}
-            <div className="w-full bg-white/3 border border-white/6 rounded-2xl
-                            px-4 py-3 mb-6 animate-scale-in">
-              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2">
+            <div className="w-full bg-white/[0.03] border border-white/[0.06] rounded-2xl
+                            px-4 py-3.5 mb-6 animate-fade-up stagger-6">
+              <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2.5">
                 Team on shift now
               </p>
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2">
                 {["K","T","A","M"].map((initial, i) => (
                   <div
                     key={i}
                     className={`w-8 h-8 rounded-full flex items-center justify-center
                                 text-xs font-black text-white shadow-md
                                 bg-gradient-to-br ${mood.from} ${mood.to}`}
-                    style={{ opacity: 0.6 + i * 0.1 }}
+                    style={{ opacity: 0.55 + i * 0.12 }}
                   >
                     {initial}
                   </div>
@@ -1269,14 +1319,15 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
               </div>
             </div>
 
-            {/* View My Times */}
+            {/* View My Times link */}
             <a
               href={`/clock/${staffId}/times`}
-              className="w-full flex items-center justify-center gap-2.5 mb-12
-                         bg-white/5 border border-white/8 rounded-2xl py-4
+              className="w-full flex items-center justify-center gap-2.5
+                         bg-white/[0.04] border border-white/[0.07] rounded-2xl py-4
                          text-slate-400 text-sm font-bold
                          hover:bg-white/10 hover:text-white hover:border-white/15
                          active:scale-95 transition-all duration-150"
+              style={{ touchAction: "manipulation" }}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor"
                 strokeWidth={2} viewBox="0 0 24 24">
@@ -1289,9 +1340,10 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
         )}
       </main>
 
-      {/* ══════════════════════════════════ REMINDER MODAL ══════════════════════════════════
-          Logic is 100% identical to original — only styled for dark theme.
-      ══════════════════════════════════════════════════════════════════════════════════════ */}
+      {/* ═══════════════════════════════════════════════════════════
+          CLOCK-OUT REMINDER MODAL
+          Logic 100% identical to original — styled for dark theme.
+          ═══════════════════════════════════════════════════════════ */}
       {showModal && reminderSettings?.reminder_time && (
         <>
           <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm" />
@@ -1302,14 +1354,14 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
             <div className="bg-slate-900 border-t border-x border-white/10
                             rounded-t-3xl shadow-2xl px-6 pt-8 pb-10">
 
-              {/* Animated clock icon */}
+              {/* Pulsing clock icon */}
               <div className="flex justify-center mb-5">
                 <div className="relative flex items-center justify-center">
-                  <div className="absolute w-20 h-20 rounded-full bg-amber-500/15 animate-ring-1" />
+                  <div className="absolute w-20 h-20 rounded-full bg-amber-500/12 animate-ring-1" />
                   <div className="relative w-16 h-16 rounded-full bg-amber-500/15
                                   flex items-center justify-center">
-                    <svg className="w-8 h-8 text-amber-400" fill="none"
-                      stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <svg className="w-8 h-8 text-amber-400" fill="none" stroke="currentColor"
+                      strokeWidth={2} viewBox="0 0 24 24">
                       <circle cx="12" cy="12" r="9" />
                       <path strokeLinecap="round" d="M12 7v5l3.5 2" />
                     </svg>
@@ -1341,22 +1393,21 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
                   className="w-full bg-emerald-600 hover:bg-emerald-500 active:scale-95
                              disabled:opacity-60 text-white font-black text-lg
                              rounded-2xl py-4 transition-all duration-100"
+                  style={{ touchAction: "manipulation" }}
                 >
                   {isRespondingToReminder ? "Saving…" : "✅ Still Working"}
                 </button>
                 <button
                   onClick={handleClockOutFromReminder}
                   disabled={isRespondingToReminder || isGettingLocation}
-                  className="w-full bg-white/5 hover:bg-rose-500/15 active:scale-95
+                  className="w-full bg-white/[0.05] hover:bg-rose-500/15 active:scale-95
                              disabled:opacity-60 text-rose-400 font-black text-lg
-                             rounded-2xl py-4 border border-rose-500/25 hover:border-rose-500/50
-                             transition-all duration-100"
+                             rounded-2xl py-4 border border-rose-500/25
+                             hover:border-rose-500/50 transition-all duration-100"
+                  style={{ touchAction: "manipulation" }}
                 >
-                  {isGettingLocation
-                    ? "Getting location…"
-                    : isRespondingToReminder
-                    ? "Clocking out…"
-                    : "🕐 Clock Out"}
+                  {isGettingLocation ? "Getting location…" :
+                   isRespondingToReminder ? "Clocking out…" : "🕐 Clock Out"}
                 </button>
               </div>
 
@@ -1367,24 +1418,6 @@ export default function ClockPage({ params }: { params: Promise<{ staffId: strin
           </div>
         </>
       )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TINY HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-function Chip({ icon, text, color }: { icon: string; text: string; color: "amber"|"violet"|"emerald" }) {
-  const cls = {
-    amber:   "bg-amber-500/10  border-amber-500/20  text-amber-400",
-    violet:  "bg-violet-500/10 border-violet-500/20 text-violet-400",
-    emerald: "bg-emerald-500/10 border-emerald-500/20 text-emerald-400",
-  }[color];
-  return (
-    <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${cls}`}>
-      <span>{icon}</span>
-      <span>{text}</span>
     </div>
   );
 }
