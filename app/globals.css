@@ -24,3 +24,137 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ─── Gamified clock page — animation library ─────────────────────────────── */
+
+/* Ambient background orbs */
+@keyframes orb-a {
+  0%,100% { transform: translate(0,0)     scale(1);    }
+  33%     { transform: translate(20px,-30px) scale(1.06); }
+  66%     { transform: translate(-15px,15px) scale(0.97); }
+}
+@keyframes orb-b {
+  0%,100% { transform: translate(0,0)      scale(1);    }
+  40%     { transform: translate(-25px,20px) scale(1.04); }
+  70%     { transform: translate(18px,-12px) scale(0.98); }
+}
+@keyframes orb-c {
+  0%,100% { transform: translate(0,0)     scale(1);    }
+  50%     { transform: translate(12px,25px) scale(1.05); }
+}
+.animate-orb-a { animation: orb-a 12s ease-in-out infinite; }
+.animate-orb-b { animation: orb-b  9s ease-in-out infinite; animation-delay: -3s; }
+.animate-orb-c { animation: orb-c 14s ease-in-out infinite; animation-delay: -7s; }
+
+/* Pulsing rings radiating from the button when clocked in */
+@keyframes ring-expand {
+  0%   { transform: scale(1);    opacity: 0.6; }
+  100% { transform: scale(1.9);  opacity: 0;   }
+}
+.animate-ring-1 { animation: ring-expand 2.4s ease-out infinite; }
+.animate-ring-2 { animation: ring-expand 2.4s ease-out infinite; animation-delay: 0.8s; }
+.animate-ring-3 { animation: ring-expand 2.4s ease-out infinite; animation-delay: 1.6s; }
+
+/* Button glow when clocked in */
+@keyframes glow-green {
+  0%,100% { box-shadow: 0 0 24px 4px rgba(16,185,129,.35), 0 8px 32px rgba(0,0,0,.5); }
+  50%     { box-shadow: 0 0 40px 8px rgba(16,185,129,.55), 0 8px 40px rgba(0,0,0,.6); }
+}
+@keyframes glow-red {
+  0%,100% { box-shadow: 0 0 24px 4px rgba(244,63,94,.35), 0 8px 32px rgba(0,0,0,.5); }
+  50%     { box-shadow: 0 0 40px 8px rgba(244,63,94,.55), 0 8px 40px rgba(0,0,0,.6); }
+}
+.animate-glow-green { animation: glow-green 2.5s ease-in-out infinite; }
+.animate-glow-red   { animation: glow-red   2.5s ease-in-out infinite; }
+
+/* Button press — handled via transition + active:scale, but also a ripple */
+@keyframes ripple-out {
+  0%   { transform: scale(0); opacity: 0.5; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+.animate-ripple { animation: ripple-out 0.5s ease-out forwards; }
+
+/* Full-screen success overlay */
+@keyframes success-in {
+  0%   { opacity: 0; }
+  15%  { opacity: 1; }
+  75%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+.animate-success { animation: success-in 1.8s ease-in-out forwards; }
+
+/* Success emoji bounce */
+@keyframes emoji-bounce {
+  0%   { transform: scale(0) rotate(-15deg); }
+  50%  { transform: scale(1.25) rotate(5deg); }
+  70%  { transform: scale(0.9)  rotate(-3deg); }
+  100% { transform: scale(1)    rotate(0deg); }
+}
+.animate-emoji { animation: emoji-bounce 0.6s cubic-bezier(0.16,1,0.3,1) both; animation-delay: 0.15s; }
+
+/* Slide up from bottom (summary card, reminder modal) */
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-slide-up { animation: slide-up 0.44s cubic-bezier(0.16,1,0.3,1) both; }
+
+/* Toast drop from top */
+@keyframes toast-drop {
+  from { transform: translateY(-100%) scale(0.92); opacity: 0; }
+  to   { transform: translateY(0)     scale(1);    opacity: 1; }
+}
+@keyframes toast-lift {
+  from { transform: translateY(0)     scale(1);    opacity: 1; }
+  to   { transform: translateY(-100%) scale(0.92); opacity: 0; }
+}
+.animate-toast-in  { animation: toast-drop 0.4s cubic-bezier(0.16,1,0.3,1) both; }
+.animate-toast-out { animation: toast-lift 0.3s ease-in both; }
+
+/* Fade + rise for text swaps */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.45s ease-out both; }
+
+/* XP bar fill on mount */
+@keyframes bar-fill {
+  from { width: 0%; }
+}
+.animate-bar-fill {
+  animation: bar-fill 1.6s cubic-bezier(0.16,1,0.3,1) both;
+  animation-delay: 0.7s;
+}
+
+/* Scale-in for cards */
+@keyframes scale-in {
+  from { transform: scale(0.94); opacity: 0; }
+  to   { transform: scale(1);    opacity: 1; }
+}
+.animate-scale-in { animation: scale-in 0.4s cubic-bezier(0.16,1,0.3,1) both; }
+
+/* Shimmer effect (on badges, cards) */
+@keyframes shimmer {
+  from { background-position: -200% center; }
+  to   { background-position:  200% center; }
+}
+.animate-shimmer {
+  background: linear-gradient(90deg,
+    transparent 0%, rgba(255,255,255,0.08) 50%, transparent 100%
+  );
+  background-size: 200% auto;
+  animation: shimmer 2.5s linear infinite;
+}
+
+/* Subtle tick for the live clock */
+@keyframes tick {
+  0%, 100% { opacity: 1; }
+  49%       { opacity: 1; }
+  50%       { opacity: 0; }
+  51%       { opacity: 0; }
+}
+.animate-tick { animation: tick 1s step-end infinite; }
+
+/* Manager reminder modal — legacy class kept for compat */
+.animate-slide-up-legacy { animation: slide-up 0.4s cubic-bezier(0.16,1,0.3,1) both; }

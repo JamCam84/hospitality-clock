@@ -17,6 +17,7 @@ import {
   localToday,
   type PayrollSettings,
 } from "@/lib/time-calc";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -150,6 +151,9 @@ function StatusBadge({ status }: { status: ApprovalStatus }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ApprovalPage() {
+
+  // ── Permissions ───────────────────────────────────────────────────────────────
+  const { currentUser, canApproveTime, canEditTime } = useCurrentUser();
 
   // ── Payroll settings ─────────────────────────────────────────────────────────
   const [settings, setSettings] = useState<PayrollSettings | null>(null);
@@ -879,22 +883,42 @@ export default function ApprovalPage() {
         {hasLoaded && !isLoading && (
           <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
 
+            {/* Permission warning — shown when current user can't approve or edit */}
+            {currentUser && (!canApproveTime || !canEditTime) && (
+              <div className="mx-5 mt-4 flex items-start gap-2.5 bg-amber-50 border border-amber-200
+                              rounded-xl px-4 py-3 text-sm text-amber-800">
+                <svg className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" fill="none"
+                  stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round"
+                    d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+                <span>
+                  <strong>{currentUser.full_name}</strong> has limited permissions.
+                  {!canApproveTime && " Approving time is disabled."}
+                  {!canEditTime && " Editing sessions is disabled."}
+                  {" "}Contact an Admin to change your permissions.
+                </span>
+              </div>
+            )}
+
             {/* Section header + Approve Full Period button */}
             <div className="px-5 py-4 border-b border-gray-50 flex items-center justify-between gap-4 flex-wrap">
               <h2 className="text-sm font-semibold text-gray-700">Employee Time Review</h2>
-              <button
-                onClick={() => setShowApproveAllModal(true)}
-                disabled={sessions.filter((s) => s.clock_in_time && s.clock_out_time).length === 0}
-                className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600
-                           active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed
-                           text-white font-semibold text-xs rounded-xl px-4 py-2
-                           transition-all duration-150 shadow-sm"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-                Approve Full Period
-              </button>
+              {canApproveTime && (
+                <button
+                  onClick={() => setShowApproveAllModal(true)}
+                  disabled={sessions.filter((s) => s.clock_in_time && s.clock_out_time).length === 0}
+                  className="flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-600
+                             active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed
+                             text-white font-semibold text-xs rounded-xl px-4 py-2
+                             transition-all duration-150 shadow-sm"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Approve Full Period
+                </button>
+              )}
             </div>
 
             {/* Global approval feedback */}
@@ -985,31 +1009,35 @@ export default function ApprovalPage() {
                           {/* Actions */}
                           <td className="px-4 py-3 whitespace-nowrap">
                             <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                              {/* Approve Employee button */}
-                              {row.approvalStatus !== "approved" ? (
-                                <button
-                                  onClick={() => handleApproveEmployee(row)}
-                                  disabled={
-                                    approvingStaffId === row.id ||
-                                    row.approvalStatus === "needs_attention"
-                                  }
-                                  title={
-                                    row.approvalStatus === "needs_attention"
-                                      ? "Resolve open sessions or flags before approving"
-                                      : "Approve all closed sessions for this employee"
-                                  }
-                                  className="text-xs font-semibold text-emerald-700 hover:text-white
-                                             hover:bg-emerald-500 border border-emerald-300
-                                             hover:border-emerald-500 rounded-lg px-2.5 py-1.5
-                                             transition-all duration-150 disabled:opacity-40
-                                             disabled:cursor-not-allowed"
-                                >
-                                  {approvingStaffId === row.id ? "…" : "Approve"}
-                                </button>
-                              ) : (
-                                <span className="text-xs text-emerald-500 font-medium px-2.5 py-1.5">
-                                  ✓ Done
-                                </span>
+                              {/* Approve Employee button — hidden if user can't approve */}
+                              {canApproveTime && (
+                                <>
+                                  {row.approvalStatus !== "approved" ? (
+                                    <button
+                                      onClick={() => handleApproveEmployee(row)}
+                                      disabled={
+                                        approvingStaffId === row.id ||
+                                        row.approvalStatus === "needs_attention"
+                                      }
+                                      title={
+                                        row.approvalStatus === "needs_attention"
+                                          ? "Resolve open sessions or flags before approving"
+                                          : "Approve all closed sessions for this employee"
+                                      }
+                                      className="text-xs font-semibold text-emerald-700 hover:text-white
+                                                 hover:bg-emerald-500 border border-emerald-300
+                                                 hover:border-emerald-500 rounded-lg px-2.5 py-1.5
+                                                 transition-all duration-150 disabled:opacity-40
+                                                 disabled:cursor-not-allowed"
+                                    >
+                                      {approvingStaffId === row.id ? "…" : "Approve"}
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-emerald-500 font-medium px-2.5 py-1.5">
+                                      ✓ Done
+                                    </span>
+                                  )}
+                                </>
                               )}
                               <button
                                 onClick={() => toggleExpand(row.id)}
@@ -1150,15 +1178,17 @@ export default function ApprovalPage() {
 
                                             <div className="shrink-0 flex items-center gap-2">
                                               <SessionBadges session={session} />
-                                              <button
-                                                onClick={() => startEdit(session)}
-                                                className="text-xs font-semibold text-stone-500
-                                                           hover:text-sky-700 hover:bg-sky-50 border
-                                                           border-stone-200 hover:border-sky-200 rounded-lg
-                                                           px-2.5 py-1.5 transition-all duration-150"
-                                              >
-                                                Edit
-                                              </button>
+                                              {canEditTime && (
+                                                <button
+                                                  onClick={() => startEdit(session)}
+                                                  className="text-xs font-semibold text-stone-500
+                                                             hover:text-sky-700 hover:bg-sky-50 border
+                                                             border-stone-200 hover:border-sky-200 rounded-lg
+                                                             px-2.5 py-1.5 transition-all duration-150"
+                                                >
+                                                  Edit
+                                                </button>
+                                              )}
                                             </div>
 
                                             {session.edit_reason && (
